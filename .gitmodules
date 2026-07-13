@@ -1,0 +1,8 @@
+[submodule "vendor/ByteTrack"]
+	path = vendor/ByteTrack
+	url = https://github.com/ifzhang/ByteTrack.git
+	shallow = true
+[submodule "vendor/RT-DETRv2"]
+	path = vendor/RT-DETRv2
+	url = https://github.com/lyuwenyu/RT-DETR.git
+	shallow = true
