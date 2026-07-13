@@ -15,6 +15,12 @@ dependencies = [
     "uvicorn[standard]>=0.35.0,<1.0.0",
 ]
 
+[project.optional-dependencies]
+native-gpu = [
+    "nvidia-cuda-runtime==13.0.96; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "tensorrt==10.13.3.9; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
 [dependency-groups]
 dev = [
     "httpx>=0.28.1,<1.0.0",
@@ -26,6 +32,9 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv]
+exclude-dependencies = ["nvidia-cuda-runtime-cu13"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/swimtrack_ai"]

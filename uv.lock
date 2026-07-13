@@ -7,6 +7,9 @@ resolution-markers = [
     "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux')",
 ]
 
+[manifest]
+excludes = ["nvidia-cuda-runtime-cu13"]
+
 [[package]]
 name = "annotated-doc"
 version = "0.0.4"
@@ -232,6 +235,14 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/76/8c/2ba3902e1a0fc1c74962ea9bb33a534bb05984ad7ff9515bf8d07527cadd/numpy-1.26.4-cp312-cp312-musllinux_1_1_x86_64.whl", hash = "sha256:1dda2e7b4ec9dd512f84935c5f126c8bd8b9f2fc001e9f54af255e8c5f16b0e0", size = 17786643, upload-time = "2024-02-05T23:57:56.585Z" },
     { url = "https://files.pythonhosted.org/packages/28/4a/46d9e65106879492374999e76eb85f87b15328e06bd1550668f79f7b18c6/numpy-1.26.4-cp312-cp312-win32.whl", hash = "sha256:50193e430acfc1346175fcbdaa28ffec49947a06918b7b92130744e81e640110", size = 5677803, upload-time = "2024-02-05T23:58:08.963Z" },
     { url = "https://files.pythonhosted.org/packages/16/2e/86f24451c2d530c88daf997cb8d6ac622c1d40d19f5a031ed68a4b73a374/numpy-1.26.4-cp312-cp312-win_amd64.whl", hash = "sha256:08beddf13648eb95f8d867350f6a018a4be2e5ad54c8d8caed89ebca558b2818", size = 15517754, upload-time = "2024-02-05T23:58:36.364Z" },
+]
+
+[[package]]
+name = "nvidia-cuda-runtime"
+version = "13.0.96"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/24/d1558f3b68b1d26e706813b1d10aa1d785e4698c425af8db8edc3dced472/nvidia_cuda_runtime-13.0.96-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:7f82250d7782aa23b6cfe765ecc7db554bd3c2870c43f3d1821f1d18aebf0548", size = 2243632, upload-time = "2025-10-09T08:55:36.117Z" },
 ]
 
 [[package]]
@@ -463,6 +474,12 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
 ]
 
+[package.optional-dependencies]
+native-gpu = [
+    { name = "nvidia-cuda-runtime", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "tensorrt", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "httpx" },
@@ -477,11 +494,14 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.128.0,<1.0.0" },
     { name = "lap", specifier = ">=0.5.12,<1.0.0" },
     { name = "numpy", specifier = ">=1.26.4,<2.0.0" },
+    { name = "nvidia-cuda-runtime", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'native-gpu'", specifier = "==13.0.96" },
     { name = "opencv-python-headless", specifier = ">=4.11.0.86,<5.0.0" },
     { name = "python-multipart", specifier = ">=0.0.20,<1.0.0" },
     { name = "scipy", specifier = ">=1.15.0,<2.0.0" },
+    { name = "tensorrt", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'native-gpu'", specifier = "==10.13.3.9" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.35.0,<1.0.0" },
 ]
+provides-extras = ["native-gpu"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -490,6 +510,39 @@ dev = [
     { name = "pytest-cov", specifier = ">=6.2.0,<8.0.0" },
     { name = "ruff", specifier = ">=0.12.0,<1.0.0" },
 ]
+
+[[package]]
+name = "tensorrt"
+version = "10.13.3.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tensorrt-cu13", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux')" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/77/88/5d4cac975abb19654a6589ce7cd06fab15f6299382b67ba876b9e2438d1f/tensorrt-10.13.3.9.tar.gz", hash = "sha256:89ec5c15c6327c17a9bf592a0801f793c786f45b4f0e0089a3a875d639887fa1", size = 40518, upload-time = "2025-09-05T18:54:22.142Z" }
+
+[[package]]
+name = "tensorrt-cu13"
+version = "10.13.3.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tensorrt-cu13-bindings", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux')" },
+    { name = "tensorrt-cu13-libs", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux')" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a6/a2/85966c080f2bf2a4dd762b30957432ecf4d78151862734292e19256db215/tensorrt_cu13-10.13.3.9.tar.gz", hash = "sha256:413eab91b37313ca6158e70df0773047d278ad8bcce243d1954a17cd8d3feaca", size = 18168, upload-time = "2025-09-05T18:54:44.033Z" }
+
+[[package]]
+name = "tensorrt-cu13-bindings"
+version = "10.13.3.9"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e6/e9/087a8062dcc1c63fcb8d2292d48a1195ef8b29e5c7b178c8fd371942d063/tensorrt_cu13_bindings-10.13.3.9-cp312-none-manylinux_2_28_x86_64.whl", hash = "sha256:9e3adb281af85508518b90979d0bf3a1704a40c3165a99d5b27e2cfee72f1b14", size = 1184541, upload-time = "2025-09-05T18:55:53.4Z" },
+]
+
+[[package]]
+name = "tensorrt-cu13-libs"
+version = "10.13.3.9"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a6/ce/a2fb0d865c3d6ac7be80c96d32d6dbe728ebc54010cf2d4e563576265787/tensorrt_cu13_libs-10.13.3.9.tar.gz", hash = "sha256:9726be3d5582a9162a9e0cb3492e9367826960b8c5ad65701d420ce74cc67b0d", size = 706, upload-time = "2025-09-05T18:02:18.78Z" }
 
 [[package]]
 name = "typing-extensions"

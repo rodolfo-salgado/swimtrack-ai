@@ -14,47 +14,80 @@ swimtrack-ai (una réplica, una GPU)
   -> bboxes en coordenadas del video original
 ```
 
-El servicio mantiene estado en memoria. Debe ejecutarse con un solo worker y una sesión debe permanecer en la misma instancia durante toda su vida. El Compose ya fija `--workers 1` y reserva únicamente la GPU 0.
+El servicio mantiene estado en memoria. Debe ejecutarse con un solo worker y una sesión debe permanecer en la misma instancia durante toda su vida. La configuración nativa usa `CUDA_VISIBLE_DEVICES=0` y `--workers 1`; el Compose aplica las restricciones equivalentes.
 
 ## Requisitos del host GPU
 
-- Linux x86_64 con Docker Engine y Docker Compose.
-- NVIDIA driver 580.173.02 o compatible.
-- NVIDIA Container Toolkit configurado para Docker.
+- Linux x86_64 con glibc 2.28 o posterior, NVIDIA driver R580 y acceso funcional a la GPU mediante `nvidia-smi`.
+- `uv` con capacidad de instalar Python 3.12 y descargar paquetes desde PyPI.
 - Los submodules `vendor/ByteTrack` y `vendor/RT-DETRv2` inicializados.
-- El ONNX y su archivo de external data en el directorio montado como `/model-source`.
+- El ONNX `rtdetrv2_s.onnx` y su archivo `rtdetrv2_s.onnx.data` disponibles en el filesystem.
+- Al menos 8 GiB libres y escribibles para `.venv`, los wheels CUDA/TensorRT y el engine cacheado; la instalación comprobada ocupa aproximadamente 3.5 GiB antes del cache y algunas configuraciones pueden conservar otra copia de los wheels.
 
-El engine TensorRT no se distribuye. Se construye desde el ONNX la primera vez y se guarda en el volumen `trt-cache`. Un manifest incluye el hash del ONNX y su external data, versión de TensorRT, device y opciones de build; cualquier cambio invalida el cache. Si el engine compatible por manifest no puede deserializarse, el servicio lo reconstruye una vez.
+El engine TensorRT no se distribuye. Se construye desde el ONNX la primera vez y se guarda en el directorio configurado por `SWIMTRACK_MODEL_CACHE_DIR`. Un manifest incluye el hash del ONNX y su external data, versión de TensorRT, device y opciones de build; cualquier cambio invalida el cache. Si el engine compatible por manifest no puede deserializarse, el servicio lo reconstruye una vez.
 
-## Configuración y despliegue
+## Ejecución nativa con `uv` sin Docker ni sudo
+
+Esta es la ruta recomendada cuando el usuario no puede instalar paquetes del sistema. El extra `native-gpu` instala TensorRT 10.13.3.9 y CUDA Runtime 13.0 dentro de `.venv`; no instala ni modifica el driver del host.
+
+Desde `swimtrack-ai/`:
+
+```bash
+nvidia-smi
+ldd --version
+git submodule update --init --recursive
+cp .env.native.example .env.native
+mkdir -p model-cache
+uv python install 3.12
+uv sync --locked --no-dev --extra native-gpu
+```
+
+Las rutas de `.env.native.example` son relativas a `swimtrack-ai/` y funcionan con la estructura de directorios recomendada. Edita `SWIMTRACK_AUTH_TOKEN` y usa rutas absolutas si los repositorios no son hermanos.
+
+Comprueba TensorRT y la visibilidad CUDA antes de iniciar la API:
+
+```bash
+uv run --locked --no-dev --extra native-gpu --env-file .env.native -- python -c "from cuda.bindings import runtime as c; error, count = c.cudaGetDeviceCount(); print(error, count); assert error == c.cudaError_t.cudaSuccess and count > 0"
+uv run --locked --no-dev --extra native-gpu --env-file .env.native -- python -c "import tensorrt as trt; print(trt.__version__); assert trt.Builder(trt.Logger())"
+```
+
+Inicia exactamente un worker y mantén el servicio ligado a localhost cuando se acceda por SSH tunnel:
+
+```bash
+uv run --locked --no-dev --extra native-gpu --env-file .env.native -- uvicorn swimtrack_ai.main:app --host 127.0.0.1 --port 8001 --workers 1
+```
+
+El startup inicial puede tardar varios minutos mientras TensorRT construye el engine. Uvicorn no acepta requests hasta terminar el lifespan de startup. Cuando aparezca `Application startup complete`, verifica:
+
+```bash
+curl http://127.0.0.1:8001/healthz
+curl http://127.0.0.1:8001/readyz
+```
+
+Para una primera prueba persistente sin privilegios, ejecuta Uvicorn dentro de `tmux`. En un cluster administrado usa el scheduler disponible, por ejemplo Slurm, en vez de dejar procesos fuera de una asignación.
+
+### Conexión mediante SSH tunnel
+
+Desde la máquina donde corre `swimtrack-front`, crea un tunnel cifrado y deja el proceso activo:
+
+```bash
+ssh -NT -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:18001:127.0.0.1:8001 usuario@gpu-host
+```
+
+Configura el front con `VISION_BASE_URL=http://127.0.0.1:18001` y el mismo token. Esta alternativa no requiere abrir el puerto 8001 ni administrar el firewall de la máquina GPU.
+
+## Ejecución alternativa con Docker
+
+El despliegue containerizado se conserva para hosts donde Docker y NVIDIA Container Toolkit estén disponibles:
 
 ```bash
 cp .env.example .env
-```
-
-Edita al menos `SWIMTRACK_AUTH_TOKEN` y, si es necesario, `SWIMTRACK_MODEL_HOST_DIR`. El directorio de modelos debe contener:
-
-```text
-rtdetrv2_s.onnx
-rtdetrv2_s.onnx.data
-```
-
-Luego inicia el servicio:
-
-```bash
 docker compose up --build
 ```
 
-El startup inicial puede tardar varios minutos mientras TensorRT construye el engine. Uvicorn no empieza a servir requests hasta que termina el lifespan de startup:
+Edita al menos `SWIMTRACK_AUTH_TOKEN` y `SWIMTRACK_MODEL_HOST_DIR`. El volumen `trt-cache` persiste el engine y el Compose limita el proceso a GPU 0. Si el front está en otra máquina, publica `SWIMTRACK_BIND_HOST` únicamente sobre una IP privada/VPN o coloca un reverse proxy con TLS/mTLS delante.
 
-```bash
-curl http://localhost:8001/healthz
-curl http://localhost:8001/readyz
-```
-
-Una vez iniciado, `/healthz` indica que el proceso está vivo y `/readyz` que modelo y tracker están disponibles. Si la inicialización falla, el proceso termina para que la política `restart` de Compose vuelva a intentarlo.
-
-El puerto escucha en `127.0.0.1` por defecto. Si el front está en otra máquina, publica `SWIMTRACK_BIND_HOST` únicamente sobre la IP de una red privada/VPN o coloca un reverse proxy con TLS/mTLS delante; no envíes el token compartido por Internet mediante HTTP plano. Aplica también límites de request en ese proxy, ya que un body HTTP chunked no siempre declara `Content-Length`.
+Una vez iniciado, `/healthz` indica que el proceso está vivo y `/readyz` que modelo y tracker están disponibles. Si la inicialización falla, el proceso termina para que el supervisor elegido vuelva a intentarlo.
 
 ## Contrato API
 

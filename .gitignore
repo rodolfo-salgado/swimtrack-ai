@@ -1,7 +1,9 @@
 .env
+.env.native
 .pytest_cache/
 .ruff_cache/
 .venv/
+/model-cache/
 __pycache__/
 *.py[cod]
 htmlcov/
