@@ -7,45 +7,18 @@ from math import prod, sqrt
 import cv2
 import numpy as np
 
+from swimtrack_ai.calibration import (
+    FIXED_CAMERA_CALIBRATION_ID as FIXED_CAMERA_CALIBRATION_ID,
+)
+from swimtrack_ai.calibration import (
+    FIXED_CAMERA_CENTER_LANE,
+    LaneCalibration,
+    lanes_for_calibration,
+    perspective_matrix,
+)
 from swimtrack_ai.schemas import BoundingBox, LaneLapScore, LapEvidence
 
-FIXED_CAMERA_CALIBRATION_ID = "fixed-camera-v1"
 LAP_SCORE_VERSION = "trajectory-v1"
-
-
-@dataclass(frozen=True, slots=True)
-class LaneCalibration:
-    """Perspective calibration expressed relative to image width and height.
-
-    ``source_quad`` is the complete lane on the pool plane, including the two
-    near-wall corners that lie outside the camera frame. ``visible_polygon`` is
-    that trapezoid clipped to the image. Coordinates were measured from
-    ``mpv-shot0001.jpg`` (1041x1041) and normalized so the same calibration can
-    be used with the original 1080x1080 videos.
-    """
-
-    lane_id: str
-    source_quad: tuple[tuple[float, float], ...]
-    visible_polygon: tuple[tuple[float, float], ...]
-
-
-FIXED_CAMERA_CENTER_LANE = LaneCalibration(
-    lane_id="center",
-    source_quad=(
-        (0.4463, 0.1583),
-        (0.5815, 0.1583),
-        (1.2603, 0.9769),
-        (-0.2507, 0.9769),
-    ),
-    visible_polygon=(
-        (0.4463, 0.1583),
-        (0.5815, 0.1583),
-        (1.0000, 0.6630),
-        (1.0000, 0.9769),
-        (0.0000, 0.9769),
-        (0.0000, 0.6824),
-    ),
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,12 +49,6 @@ def fixed_camera_visible_polygon() -> tuple[tuple[float, float], ...]:
     """Return the normalized polygon of the only lane visible end-to-end."""
 
     return FIXED_CAMERA_CENTER_LANE.visible_polygon
-
-
-def _perspective_matrix(calibration: LaneCalibration) -> np.ndarray:
-    source = np.asarray(calibration.source_quad, dtype=np.float32)
-    target = np.asarray(((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)), dtype=np.float32)
-    return cv2.getPerspectiveTransform(source, target)
 
 
 def _clip01(value: float) -> float:
@@ -119,15 +86,13 @@ class LapAnalyzer:
     lane_margin = 0.05
 
     def __init__(self, fps: float, calibration_id: str) -> None:
-        if calibration_id != FIXED_CAMERA_CALIBRATION_ID:
-            raise ValueError(f"Unsupported lap calibration: {calibration_id}")
         self.fps = fps
-        calibration = FIXED_CAMERA_CENTER_LANE
         self._lanes = {
             calibration.lane_id: _LaneRuntime(
                 calibration=calibration,
-                image_to_lane=_perspective_matrix(calibration),
+                image_to_lane=perspective_matrix(calibration),
             )
+            for calibration in lanes_for_calibration(calibration_id)
         }
 
     def observe(

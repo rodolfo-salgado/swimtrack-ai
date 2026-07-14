@@ -11,16 +11,19 @@ from fastapi.testclient import TestClient
 
 from swimtrack_ai.api import create_app
 from swimtrack_ai.config import Settings
+from swimtrack_ai.detectors import DetectorResult
 from swimtrack_ai.tracker import TrackerUpdate
 
 
 class StubTracker:
     def __init__(self) -> None:
         self.calls = 0
+        self.detections: list[np.ndarray] = []
 
-    def update(self, detections: np.ndarray, image_size: tuple[int, int]) -> list:
+    def update(self, detections: np.ndarray, image_size: tuple[int, int]) -> TrackerUpdate:
         del image_size
         self.calls += 1
+        self.detections.append(detections.copy())
         return TrackerUpdate(
             active_tracks=[
                 SimpleNamespace(track_id=index + 1, tlbr=detection[:4], score=float(detection[4]))
@@ -222,6 +225,50 @@ def test_unknown_lap_calibration_is_rejected(client: TestClient) -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_fixed_camera_roi_routes_detections_before_its_lane_tracker(settings: Settings) -> None:
+    detections = np.asarray(
+        [
+            [54.0, 48.0, 74.0, 72.0, 0.90],
+            [0.0, 0.0, 10.0, 10.0, 0.95],
+        ],
+        dtype=np.float32,
+    )
+
+    class StagedDetector:
+        def infer(self, _frame: np.ndarray, _target_size: tuple[int, int]) -> DetectorResult:
+            return DetectorResult(person_candidates=detections.copy(), accepted=detections.copy())
+
+        def close(self) -> None:
+            return None
+
+    tracker_factory = StubTrackerFactory(settings)
+    app = create_app(
+        settings=settings,
+        detector_factory=lambda _settings: StagedDetector(),
+        tracker_factory_builder=lambda _settings: tracker_factory,
+    )
+    with TestClient(app) as test_client:
+        created = test_client.post(
+            "/v1/tracking-sessions",
+            headers={"X-Swimtrack-Auth": "test-secret"},
+            json={
+                "fps": 60,
+                "lap_calibration_id": "fixed-camera-v1",
+                "diagnostics": "counts",
+            },
+        )
+        response = submit(test_client, created.json()["session_id"], metadata("roi-batch", 0))
+
+    assert created.status_code == 201
+    assert created.json()["tracking_configuration"]["lane_ids"] == ["center"]
+    assert len(tracker_factory.trackers) == 1
+    assert tracker_factory.trackers[0].detections[0].tolist() == [detections[0].tolist()]
+    frame = response.json()["frames"][0]
+    assert frame["boxes"][0]["lane_id"] == "center"
+    assert frame["tracking_diagnostics"]["detector_accepted"]["count"] == 2
+    assert frame["tracking_diagnostics"]["lanes"][0]["after_roi"]["count"] == 1
 
 
 def test_identical_retry_is_idempotent(client: TestClient) -> None:

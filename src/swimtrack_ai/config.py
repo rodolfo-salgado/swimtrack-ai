@@ -45,6 +45,7 @@ class Settings:
     track_buffer: int = 60
     match_threshold: float = 0.80
     mot20: bool = False
+    lane_roi_enabled: bool = True
     max_batch_frames: int = 8
     max_frame_bytes: int = 2_000_000
     max_batch_bytes: int = 12_000_000
@@ -83,6 +84,7 @@ class Settings:
             track_buffer=_integer("TRACK_BUFFER", 60),
             match_threshold=_floating("MATCH_THRESHOLD", 0.80),
             mot20=_boolean("MOT20", False),
+            lane_roi_enabled=_boolean("LANE_ROI_ENABLED", True),
             max_batch_frames=_integer("MAX_BATCH_FRAMES", 8),
             max_frame_bytes=_integer("MAX_FRAME_BYTES", 2_000_000),
             max_batch_bytes=_integer("MAX_BATCH_BYTES", 12_000_000),

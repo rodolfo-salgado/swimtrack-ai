@@ -23,6 +23,8 @@ class TrackingConfiguration(BaseModel):
     track_buffer: int
     match_threshold: float
     mot20: bool
+    lane_roi_enabled: bool
+    lane_ids: list[str]
     effective_lost_buffer_frames: int
     effective_lost_buffer_seconds: float
 
@@ -63,6 +65,7 @@ class BatchMetadata(BaseModel):
 
 class BoundingBox(BaseModel):
     id: int
+    lane_id: str | None = None
     x1: float
     y1: float
     x2: float

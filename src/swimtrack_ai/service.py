@@ -10,6 +10,7 @@ from typing import Callable
 
 import numpy as np
 
+from swimtrack_ai.calibration import LaneRouter
 from swimtrack_ai.config import Settings
 from swimtrack_ai.detectors import Detector, DetectorResult
 from swimtrack_ai.errors import ConflictError, SessionCapacityError, SessionNotFoundError
@@ -27,7 +28,7 @@ from swimtrack_ai.schemas import (
     SessionCreated,
     TrackingConfiguration,
 )
-from swimtrack_ai.tracker import Tracker
+from swimtrack_ai.tracker import Tracker, TrackerUpdate
 
 
 @dataclass(slots=True)
@@ -39,7 +40,8 @@ class CachedBatch:
 @dataclass(slots=True)
 class SessionState:
     session_id: str
-    tracker: Tracker
+    trackers: dict[str, Tracker]
+    lane_router: LaneRouter
     lap_analyzer: LapAnalyzer | None
     diagnostics_level: DiagnosticsLevel
     expires_at: float
@@ -77,14 +79,20 @@ class TrackingService:
             if len(self._sessions) >= self.settings.max_sessions:
                 raise SessionCapacityError("Maximum number of active tracking sessions reached")
             session_id = str(uuid.uuid4())
+            lane_router = LaneRouter(
+                lap_calibration_id,
+                enabled=self.settings.lane_roi_enabled,
+            )
             self._sessions[session_id] = SessionState(
                 session_id=session_id,
-                tracker=self.tracker_factory(fps),
+                trackers={lane_id: self.tracker_factory(fps) for lane_id in lane_router.lane_ids},
+                lane_router=lane_router,
                 lap_analyzer=LapAnalyzer(fps, lap_calibration_id) if lap_calibration_id is not None else None,
                 diagnostics_level=diagnostics,
                 expires_at=self.clock() + self.settings.session_ttl_seconds,
             )
-        effective_buffer_frames = int(fps / 30.0 * self.settings.track_buffer)
+        tracker_frame_rate = max(1, round(fps))
+        effective_buffer_frames = int(tracker_frame_rate / 30.0 * self.settings.track_buffer)
         return SessionCreated(
             session_id=session_id,
             next_sequence=0,
@@ -98,8 +106,10 @@ class TrackingService:
                     track_buffer=self.settings.track_buffer,
                     match_threshold=self.settings.match_threshold,
                     mot20=self.settings.mot20,
+                    lane_roi_enabled=lane_router.enabled,
+                    lane_ids=list(lane_router.lane_ids),
                     effective_lost_buffer_frames=effective_buffer_frames,
-                    effective_lost_buffer_seconds=effective_buffer_frames / fps,
+                    effective_lost_buffer_seconds=effective_buffer_frames / tracker_frame_rate,
                 )
                 if diagnostics != "none"
                 else None
@@ -125,8 +135,8 @@ class TrackingService:
     def _tracking_diagnostics(
         self,
         detector_result: DetectorResult,
-        active_tracks: list,
-        retained_lost_track_count: int,
+        routed_detections: dict[str, np.ndarray],
+        tracker_updates: dict[str, TrackerUpdate],
         level: DiagnosticsLevel,
     ) -> FrameTrackingDiagnostics | None:
         if level == "none":
@@ -137,11 +147,12 @@ class TrackingService:
             detector_accepted=self._diagnostic_stage(detector_result.accepted, level),
             lanes=[
                 LaneTrackingDiagnostics(
-                    lane_id="global",
-                    after_roi=self._diagnostic_stage(detector_result.accepted, level),
-                    active_track_ids=[int(track.track_id) for track in active_tracks],
-                    retained_lost_track_count=retained_lost_track_count,
+                    lane_id=lane_id,
+                    after_roi=self._diagnostic_stage(routed_detections[lane_id], level),
+                    active_track_ids=[int(track.track_id) for track in tracker_updates[lane_id].active_tracks],
+                    retained_lost_track_count=tracker_updates[lane_id].retained_lost_track_count,
                 )
+                for lane_id in routed_detections
             ],
         )
 
@@ -222,24 +233,27 @@ class TrackingService:
             frame_results: list[FrameResult] = []
             try:
                 for detector_result, item in zip(detector_results, metadata.frames):
-                    tracker_update = state.tracker.update(
-                        detector_result.accepted,
-                        (item.original_width, item.original_height),
-                    )
-                    tracks = tracker_update.active_tracks
+                    image_size = (item.original_width, item.original_height)
+                    routed_detections = state.lane_router.route(detector_result.accepted, image_size)
+                    tracker_updates = {
+                        lane_id: state.trackers[lane_id].update(detections, image_size)
+                        for lane_id, detections in routed_detections.items()
+                    }
                     boxes = []
-                    for track in tracks:
-                        x1, y1, x2, y2 = np.asarray(track.tlbr, dtype=float)
-                        boxes.append(
-                            BoundingBox(
-                                id=int(track.track_id),
-                                x1=max(0.0, min(float(x1), item.original_width - 1)),
-                                y1=max(0.0, min(float(y1), item.original_height - 1)),
-                                x2=max(0.0, min(float(x2), item.original_width - 1)),
-                                y2=max(0.0, min(float(y2), item.original_height - 1)),
-                                conf=float(track.score),
+                    for lane_id, tracker_update in tracker_updates.items():
+                        for track in tracker_update.active_tracks:
+                            x1, y1, x2, y2 = np.asarray(track.tlbr, dtype=float)
+                            boxes.append(
+                                BoundingBox(
+                                    id=int(track.track_id),
+                                    lane_id=None if lane_id == "global" else lane_id,
+                                    x1=max(0.0, min(float(x1), item.original_width - 1)),
+                                    y1=max(0.0, min(float(y1), item.original_height - 1)),
+                                    x2=max(0.0, min(float(x2), item.original_width - 1)),
+                                    y2=max(0.0, min(float(y2), item.original_height - 1)),
+                                    conf=float(track.score),
+                                )
                             )
-                        )
                     frame_results.append(
                         FrameResult(
                             frame_index=item.frame_index,
@@ -259,8 +273,8 @@ class TrackingService:
                             ),
                             tracking_diagnostics=self._tracking_diagnostics(
                                 detector_result,
-                                tracks,
-                                tracker_update.retained_lost_track_count,
+                                routed_detections,
+                                tracker_updates,
                                 state.diagnostics_level,
                             ),
                         )
