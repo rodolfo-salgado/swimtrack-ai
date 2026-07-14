@@ -3,11 +3,13 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from swimtrack_ai.detectors.base import DetectorResult
+
 
 class FakeDetector:
     """Deterministic CPU detector for API tests and local integration."""
 
-    def infer(self, frame: np.ndarray, target_size: tuple[int, int]) -> np.ndarray:
+    def infer(self, frame: np.ndarray, target_size: tuple[int, int]) -> DetectorResult:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         _, mask = cv2.threshold(gray, 32, 255, cv2.THRESH_BINARY)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -30,7 +32,8 @@ class FakeDetector:
                 ]
             )
         detections.sort(key=lambda item: item[0])
-        return np.asarray(detections, dtype=np.float32).reshape(-1, 5)
+        accepted = np.asarray(detections, dtype=np.float32).reshape(-1, 5)
+        return DetectorResult(person_candidates=accepted.copy(), accepted=accepted)
 
     def close(self) -> None:
         return None

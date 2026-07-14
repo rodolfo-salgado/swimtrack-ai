@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from swimtrack_ai.api import create_app
 from swimtrack_ai.config import Settings
+from swimtrack_ai.tracker import TrackerUpdate
 
 
 class StubTracker:
@@ -20,10 +21,12 @@ class StubTracker:
     def update(self, detections: np.ndarray, image_size: tuple[int, int]) -> list:
         del image_size
         self.calls += 1
-        return [
-            SimpleNamespace(track_id=index + 1, tlbr=detection[:4], score=float(detection[4]))
-            for index, detection in enumerate(detections)
-        ]
+        return TrackerUpdate(
+            active_tracks=[
+                SimpleNamespace(track_id=index + 1, tlbr=detection[:4], score=float(detection[4]))
+                for index, detection in enumerate(detections)
+            ]
+        )
 
 
 class StubTrackerFactory:
@@ -82,11 +85,14 @@ def metadata(batch_id: str, sequence: int, frame_index: int = 0) -> str:
     )
 
 
-def create_session(client: TestClient) -> str:
+def create_session(client: TestClient, diagnostics: str = "none") -> str:
+    payload = {"fps": 60}
+    if diagnostics != "none":
+        payload["diagnostics"] = diagnostics
     response = client.post(
         "/v1/tracking-sessions",
         headers={"X-Swimtrack-Auth": "test-secret"},
-        json={"fps": 60},
+        json=payload,
     )
     assert response.status_code == 201
     return response.json()["session_id"]
@@ -156,6 +162,56 @@ def test_fixed_camera_lap_scoring_is_opt_in(client: TestClient) -> None:
     assert score["lap_score"] == 0.0
     assert score["evaluable"] is False
     assert score["score_version"] == "trajectory-v1"
+
+
+def test_tracking_diagnostics_are_opt_in(client: TestClient) -> None:
+    default_session = create_session(client)
+    default_response = submit(client, default_session, metadata("default-diagnostics", 0))
+    assert "tracking_diagnostics" not in default_response.json()["frames"][0]
+
+    counts_session = create_session(client, diagnostics="counts")
+    counts_response = submit(client, counts_session, metadata("count-diagnostics", 0))
+    frame = counts_response.json()["frames"][0]
+    diagnostics = frame["tracking_diagnostics"]
+    assert diagnostics["person_candidates"] == {"count": 1}
+    assert diagnostics["detector_accepted"] == {"count": 1}
+    assert diagnostics["lanes"] == [
+        {
+            "lane_id": "global",
+            "after_roi": {"count": 1},
+            "active_track_ids": [1],
+            "retained_lost_track_count": 0,
+        }
+    ]
+
+
+def test_box_diagnostics_include_candidates_and_effective_configuration(client: TestClient) -> None:
+    created = client.post(
+        "/v1/tracking-sessions",
+        headers={"X-Swimtrack-Auth": "test-secret"},
+        json={"fps": 60, "diagnostics": "boxes"},
+    )
+    assert created.status_code == 201
+    configuration = created.json()["tracking_configuration"]
+    assert configuration["diagnostic_score_floor"] == 0.05
+    assert configuration["effective_lost_buffer_frames"] == 120
+    assert configuration["effective_lost_buffer_seconds"] == 2.0
+
+    response = submit(client, created.json()["session_id"], metadata("box-diagnostics", 0))
+    diagnostics = response.json()["frames"][0]["tracking_diagnostics"]
+    assert diagnostics["person_candidates"]["count"] == 1
+    assert diagnostics["person_candidates"]["boxes"][0]["conf"] == pytest.approx(0.99)
+    assert diagnostics["lanes"][0]["after_roi"]["boxes"][0]["x1"] >= 14
+
+
+def test_unknown_tracking_diagnostics_level_is_rejected(client: TestClient) -> None:
+    response = client.post(
+        "/v1/tracking-sessions",
+        headers={"X-Swimtrack-Auth": "test-secret"},
+        json={"fps": 60, "diagnostics": "verbose"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_unknown_lap_calibration_is_rejected(client: TestClient) -> None:

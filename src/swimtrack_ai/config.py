@@ -36,6 +36,7 @@ class Settings:
     device: str = "cuda:0"
     input_width: int = 640
     input_height: int = 640
+    diagnostic_score_floor: float = 0.05
     score_threshold: float = 0.35
     person_label: int = 0
     max_detections: int = 20
@@ -73,6 +74,7 @@ class Settings:
             device=_env("DEVICE", "cuda:0"),
             input_width=_integer("INPUT_WIDTH", 640),
             input_height=_integer("INPUT_HEIGHT", 640),
+            diagnostic_score_floor=_floating("DIAGNOSTIC_SCORE_FLOOR", 0.05),
             score_threshold=_floating("SCORE_THRESHOLD", 0.35),
             person_label=int(_env("PERSON_LABEL", "0")),
             max_detections=_integer("MAX_DETECTIONS", 20),

@@ -172,7 +172,12 @@ def create_app(
         payload: Annotated[CreateSessionRequest, Body()] = CreateSessionRequest(),
     ) -> SessionCreated:
         service = ready_service(request)
-        return await anyio.to_thread.run_sync(service.create_session, payload.fps, payload.lap_calibration_id)
+        return await anyio.to_thread.run_sync(
+            service.create_session,
+            payload.fps,
+            payload.lap_calibration_id,
+            payload.diagnostics,
+        )
 
     @app.delete(
         "/v1/tracking-sessions/{session_id}",

@@ -10,10 +10,43 @@ import cv2
 import numpy as np
 
 from swimtrack_ai.config import Settings
+from swimtrack_ai.detectors.base import DetectorResult
 
 
 class EngineLoadError(RuntimeError):
     pass
+
+
+def _as_detections(boxes: np.ndarray, scores: np.ndarray, target_size: tuple[int, int]) -> np.ndarray:
+    if not len(boxes):
+        return np.empty((0, 5), dtype=np.float32)
+    target_width, target_height = target_size
+    selected_boxes = boxes.astype(np.float32, copy=True)
+    selected_boxes[:, [0, 2]] = np.clip(selected_boxes[:, [0, 2]], 0, target_width - 1)
+    selected_boxes[:, [1, 3]] = np.clip(selected_boxes[:, [1, 3]], 0, target_height - 1)
+    detections = np.column_stack((selected_boxes, scores)).astype(np.float32)
+    return detections[np.argsort(detections[:, 4])[::-1]]
+
+
+def postprocess_detections(
+    labels: np.ndarray,
+    boxes: np.ndarray,
+    scores: np.ndarray,
+    settings: Settings,
+    target_size: tuple[int, int],
+) -> DetectorResult:
+    """Expose low-score person candidates while preserving runtime filters."""
+
+    person_mask = (labels == settings.person_label) & (scores >= settings.diagnostic_score_floor)
+    person_candidates = _as_detections(boxes[person_mask], scores[person_mask], target_size)
+    areas = np.maximum(0, boxes[:, 2] - boxes[:, 0]) * np.maximum(0, boxes[:, 3] - boxes[:, 1])
+    accepted_mask = (
+        (labels == settings.person_label)
+        & (scores >= settings.score_threshold)
+        & (areas >= settings.min_box_area)
+    )
+    accepted = _as_detections(boxes[accepted_mask], scores[accepted_mask], target_size)[: settings.max_detections]
+    return DetectorResult(person_candidates=person_candidates, accepted=accepted)
 
 
 def _model_files(settings: Settings) -> list[Path]:
@@ -212,7 +245,7 @@ class TensorRTDetector:
             )
         self._cuda(self.cudart.cudaStreamSynchronize(self.stream), "synchronize CUDA stream")
 
-    def infer(self, frame: np.ndarray, target_size: tuple[int, int]) -> np.ndarray:
+    def infer(self, frame: np.ndarray, target_size: tuple[int, int]) -> DetectorResult:
         with self._lock:
             inputs = self._preprocess(frame, target_size)
             for name, array in inputs.items():
@@ -224,22 +257,7 @@ class TensorRTDetector:
         labels = outputs["labels"][0].astype(np.int64, copy=False)
         boxes = outputs["boxes"][0].astype(np.float32, copy=False)
         scores = outputs["scores"][0].astype(np.float32, copy=False)
-        target_width, target_height = target_size
-        areas = np.maximum(0, boxes[:, 2] - boxes[:, 0]) * np.maximum(0, boxes[:, 3] - boxes[:, 1])
-        keep = (
-            (labels == self.settings.person_label)
-            & (scores >= self.settings.score_threshold)
-            & (areas >= self.settings.min_box_area)
-        )
-        if not keep.any():
-            return np.empty((0, 5), dtype=np.float32)
-        selected_boxes = boxes[keep].copy()
-        selected_scores = scores[keep]
-        selected_boxes[:, [0, 2]] = np.clip(selected_boxes[:, [0, 2]], 0, target_width - 1)
-        selected_boxes[:, [1, 3]] = np.clip(selected_boxes[:, [1, 3]], 0, target_height - 1)
-        detections = np.column_stack((selected_boxes, selected_scores)).astype(np.float32)
-        order = np.argsort(detections[:, 4])[::-1]
-        return detections[order][: self.settings.max_detections]
+        return postprocess_detections(labels, boxes, scores, self.settings, target_size)
 
     def close(self) -> None:
         if self._closed:

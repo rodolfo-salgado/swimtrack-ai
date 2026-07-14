@@ -4,18 +4,34 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+DiagnosticsLevel = Literal["none", "counts", "boxes"]
+
 
 class CreateSessionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     fps: float = Field(default=60.0, gt=0, le=240)
     lap_calibration_id: Literal["fixed-camera-v1"] | None = None
+    diagnostics: DiagnosticsLevel = "none"
+
+
+class TrackingConfiguration(BaseModel):
+    diagnostic_score_floor: float
+    score_threshold: float
+    min_box_area: float
+    track_threshold: float
+    track_buffer: int
+    match_threshold: float
+    mot20: bool
+    effective_lost_buffer_frames: int
+    effective_lost_buffer_seconds: float
 
 
 class SessionCreated(BaseModel):
     session_id: str
     next_sequence: int
     expires_in_seconds: int
+    tracking_configuration: TrackingConfiguration | None = None
 
 
 class FrameMetadata(BaseModel):
@@ -55,6 +71,33 @@ class BoundingBox(BaseModel):
     class_id: int = 0
 
 
+class DiagnosticBox(BaseModel):
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    conf: float = Field(ge=0, le=1)
+
+
+class DiagnosticStage(BaseModel):
+    count: int = Field(ge=0)
+    boxes: list[DiagnosticBox] | None = None
+
+
+class LaneTrackingDiagnostics(BaseModel):
+    lane_id: str
+    after_roi: DiagnosticStage
+    active_track_ids: list[int]
+    retained_lost_track_count: int = Field(ge=0)
+
+
+class FrameTrackingDiagnostics(BaseModel):
+    diagnostic_floor: float = Field(ge=0, le=1)
+    person_candidates: DiagnosticStage
+    detector_accepted: DiagnosticStage
+    lanes: list[LaneTrackingDiagnostics]
+
+
 class LapEvidence(BaseModel):
     wall: float = Field(ge=0, le=1)
     approach: float = Field(ge=0, le=1)
@@ -86,6 +129,7 @@ class FrameResult(BaseModel):
     height: int
     boxes: list[BoundingBox]
     lap_scores: list[LaneLapScore] | None = None
+    tracking_diagnostics: FrameTrackingDiagnostics | None = None
 
 
 class BatchResult(BaseModel):

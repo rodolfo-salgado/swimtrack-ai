@@ -11,10 +11,22 @@ from typing import Callable
 import numpy as np
 
 from swimtrack_ai.config import Settings
-from swimtrack_ai.detectors import Detector
+from swimtrack_ai.detectors import Detector, DetectorResult
 from swimtrack_ai.errors import ConflictError, SessionCapacityError, SessionNotFoundError
 from swimtrack_ai.lap_analysis import LapAnalyzer
-from swimtrack_ai.schemas import BatchMetadata, BatchResult, BoundingBox, FrameResult, SessionCreated
+from swimtrack_ai.schemas import (
+    BatchMetadata,
+    BatchResult,
+    BoundingBox,
+    DiagnosticBox,
+    DiagnosticsLevel,
+    DiagnosticStage,
+    FrameResult,
+    FrameTrackingDiagnostics,
+    LaneTrackingDiagnostics,
+    SessionCreated,
+    TrackingConfiguration,
+)
 from swimtrack_ai.tracker import Tracker
 
 
@@ -29,6 +41,7 @@ class SessionState:
     session_id: str
     tracker: Tracker
     lap_analyzer: LapAnalyzer | None
+    diagnostics_level: DiagnosticsLevel
     expires_at: float
     next_sequence: int = 0
     last_frame_index: int | None = None
@@ -53,7 +66,12 @@ class TrackingService:
         self._sessions: dict[str, SessionState] = {}
         self._sessions_lock = threading.RLock()
 
-    def create_session(self, fps: float, lap_calibration_id: str | None = None) -> SessionCreated:
+    def create_session(
+        self,
+        fps: float,
+        lap_calibration_id: str | None = None,
+        diagnostics: DiagnosticsLevel = "none",
+    ) -> SessionCreated:
         self.expire_sessions()
         with self._sessions_lock:
             if len(self._sessions) >= self.settings.max_sessions:
@@ -63,12 +81,68 @@ class TrackingService:
                 session_id=session_id,
                 tracker=self.tracker_factory(fps),
                 lap_analyzer=LapAnalyzer(fps, lap_calibration_id) if lap_calibration_id is not None else None,
+                diagnostics_level=diagnostics,
                 expires_at=self.clock() + self.settings.session_ttl_seconds,
             )
+        effective_buffer_frames = int(fps / 30.0 * self.settings.track_buffer)
         return SessionCreated(
             session_id=session_id,
             next_sequence=0,
             expires_in_seconds=self.settings.session_ttl_seconds,
+            tracking_configuration=(
+                TrackingConfiguration(
+                    diagnostic_score_floor=self.settings.diagnostic_score_floor,
+                    score_threshold=self.settings.score_threshold,
+                    min_box_area=self.settings.min_box_area,
+                    track_threshold=self.settings.track_threshold,
+                    track_buffer=self.settings.track_buffer,
+                    match_threshold=self.settings.match_threshold,
+                    mot20=self.settings.mot20,
+                    effective_lost_buffer_frames=effective_buffer_frames,
+                    effective_lost_buffer_seconds=effective_buffer_frames / fps,
+                )
+                if diagnostics != "none"
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _diagnostic_stage(detections: np.ndarray, level: DiagnosticsLevel) -> DiagnosticStage:
+        boxes = None
+        if level == "boxes":
+            boxes = [
+                DiagnosticBox(
+                    x1=float(detection[0]),
+                    y1=float(detection[1]),
+                    x2=float(detection[2]),
+                    y2=float(detection[3]),
+                    conf=float(detection[4]),
+                )
+                for detection in detections
+            ]
+        return DiagnosticStage(count=len(detections), boxes=boxes)
+
+    def _tracking_diagnostics(
+        self,
+        detector_result: DetectorResult,
+        active_tracks: list,
+        retained_lost_track_count: int,
+        level: DiagnosticsLevel,
+    ) -> FrameTrackingDiagnostics | None:
+        if level == "none":
+            return None
+        return FrameTrackingDiagnostics(
+            diagnostic_floor=self.settings.diagnostic_score_floor,
+            person_candidates=self._diagnostic_stage(detector_result.person_candidates, level),
+            detector_accepted=self._diagnostic_stage(detector_result.accepted, level),
+            lanes=[
+                LaneTrackingDiagnostics(
+                    lane_id="global",
+                    after_roi=self._diagnostic_stage(detector_result.accepted, level),
+                    active_track_ids=[int(track.track_id) for track in active_tracks],
+                    retained_lost_track_count=retained_lost_track_count,
+                )
+            ],
         )
 
     def delete_session(self, session_id: str) -> None:
@@ -141,17 +215,18 @@ class TrackingService:
                 raise ConflictError("time_ms must not move backwards across batches")
 
             # Infer every frame before mutating ByteTrack. Detector failures are safe to retry.
-            detections = [
+            detector_results = [
                 self.detector.infer(frame, (item.original_width, item.original_height))
                 for frame, item in zip(frames, metadata.frames)
             ]
             frame_results: list[FrameResult] = []
             try:
-                for detection, item in zip(detections, metadata.frames):
-                    tracks = state.tracker.update(
-                        detection,
+                for detector_result, item in zip(detector_results, metadata.frames):
+                    tracker_update = state.tracker.update(
+                        detector_result.accepted,
                         (item.original_width, item.original_height),
                     )
+                    tracks = tracker_update.active_tracks
                     boxes = []
                     for track in tracks:
                         x1, y1, x2, y2 = np.asarray(track.tlbr, dtype=float)
@@ -181,6 +256,12 @@ class TrackingService:
                                 )
                                 if state.lap_analyzer is not None
                                 else None
+                            ),
+                            tracking_diagnostics=self._tracking_diagnostics(
+                                detector_result,
+                                tracks,
+                                tracker_update.retained_lost_track_count,
+                                state.diagnostics_level,
                             ),
                         )
                     )

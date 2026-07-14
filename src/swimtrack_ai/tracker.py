@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import sys
 import types
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Protocol
@@ -13,8 +14,14 @@ from scipy.optimize import linear_sum_assignment
 from swimtrack_ai.config import Settings
 
 
+@dataclass(frozen=True, slots=True)
+class TrackerUpdate:
+    active_tracks: list
+    retained_lost_track_count: int = 0
+
+
 class Tracker(Protocol):
-    def update(self, detections: np.ndarray, image_size: tuple[int, int]) -> list: ...
+    def update(self, detections: np.ndarray, image_size: tuple[int, int]) -> TrackerUpdate: ...
 
 
 def _install_bytetrack_compatibility(root: Path) -> None:
@@ -95,9 +102,13 @@ class ByteTrackAdapter:
     def __init__(self, tracker) -> None:
         self._tracker = tracker
 
-    def update(self, detections: np.ndarray, image_size: tuple[int, int]) -> list:
+    def update(self, detections: np.ndarray, image_size: tuple[int, int]) -> TrackerUpdate:
         width, height = image_size
-        return self._tracker.update(detections, [height, width], [height, width])
+        active_tracks = self._tracker.update(detections, [height, width], [height, width])
+        return TrackerUpdate(
+            active_tracks=active_tracks,
+            retained_lost_track_count=len(self._tracker.lost_stracks),
+        )
 
 
 class ByteTrackFactory:
