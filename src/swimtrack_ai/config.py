@@ -40,9 +40,9 @@ class Settings:
     score_threshold: float = 0.15
     person_label: int = 0
     max_detections: int = 20
-    min_box_area: float = 150.0
-    track_threshold: float = 0.35
-    track_buffer: int = 90
+    min_box_area: float = 250.0
+    track_threshold: float = 0.45
+    track_buffer: int = 60
     match_threshold: float = 0.80
     mot20: bool = False
     lane_roi_enabled: bool = True
@@ -89,9 +89,9 @@ class Settings:
             score_threshold=_floating("SCORE_THRESHOLD", 0.15),
             person_label=int(_env("PERSON_LABEL", "0")),
             max_detections=_integer("MAX_DETECTIONS", 20),
-            min_box_area=_floating("MIN_BOX_AREA", 150.0),
-            track_threshold=_floating("TRACK_THRESHOLD", 0.35),
-            track_buffer=_integer("TRACK_BUFFER", 90),
+            min_box_area=_floating("MIN_BOX_AREA", 250.0),
+            track_threshold=_floating("TRACK_THRESHOLD", 0.45),
+            track_buffer=_integer("TRACK_BUFFER", 60),
             match_threshold=_floating("MATCH_THRESHOLD", 0.80),
             mot20=_boolean("MOT20", False),
             lane_roi_enabled=_boolean("LANE_ROI_ENABLED", True),

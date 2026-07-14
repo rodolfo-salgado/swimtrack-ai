@@ -190,6 +190,8 @@ La calibración `fixed-camera-v1` proviene de `mpv-shot0001.jpg` (1041×1041) y 
 
 Con `SWIMTRACK_LANE_ROI_ENABLED=true`, las detecciones se asignan al polígono antes de ByteTrack y cada carril usa una instancia independiente del tracker. Las sesiones sin calibración mantienen el tracker global anterior.
 
+La baseline seleccionada por el sweep de los videos 1 (`no_lap`) y 6 (`lap`) usa `SWIMTRACK_SCORE_THRESHOLD=0.15`, `SWIMTRACK_MIN_BOX_AREA=250`, `SWIMTRACK_TRACK_THRESHOLD=0.45`, `SWIMTRACK_TRACK_BUFFER=60`, `SWIMTRACK_MATCH_THRESHOLD=0.80` y `SWIMTRACK_LANE_ROI_ENABLED=true`. Estos son también los defaults de `Settings`, Compose y `.env.example`; siguen siendo configurables por environment para repetir experimentos.
+
 ```text
 visible_polygon = [(0.4463,0.1583), (0.5815,0.1583), (1.0000,0.6630), (1.0000,0.9769), (0.0000,0.9769), (0.0000,0.6824)]
 source_quad     = [(0.4463,0.1583), (0.5815,0.1583), (1.2603,0.9769), (-0.2507,0.9769)]
