@@ -108,6 +108,13 @@ class TrackingService:
                     mot20=self.settings.mot20,
                     lane_roi_enabled=lane_router.enabled,
                     lane_ids=list(lane_router.lane_ids),
+                    far_crop_enabled=self.settings.far_crop_enabled and lap_calibration_id is not None,
+                    far_crop_box=(
+                        list(self.settings.far_crop_box)
+                        if self.settings.far_crop_enabled and lap_calibration_id is not None
+                        else None
+                    ),
+                    far_crop_nms_threshold=self.settings.far_crop_nms_threshold,
                     effective_lost_buffer_frames=effective_buffer_frames,
                     effective_lost_buffer_seconds=effective_buffer_frames / tracker_frame_rate,
                 )
@@ -131,6 +138,93 @@ class TrackingService:
                 for detection in detections
             ]
         return DiagnosticStage(count=len(detections), boxes=boxes)
+
+    @staticmethod
+    def _offset_detections(detections: np.ndarray, offset: tuple[float, float]) -> np.ndarray:
+        if not len(detections):
+            return detections.copy()
+        remapped = detections.copy()
+        remapped[:, [0, 2]] += offset[0]
+        remapped[:, [1, 3]] += offset[1]
+        return remapped
+
+    @staticmethod
+    def _nms(detections: np.ndarray, iou_threshold: float) -> np.ndarray:
+        if not len(detections):
+            return np.empty((0, 5), dtype=np.float32)
+        order = np.argsort(detections[:, 4], kind="stable")[::-1]
+        keep: list[int] = []
+        while len(order):
+            current = int(order[0])
+            keep.append(current)
+            remaining = order[1:]
+            if not len(remaining):
+                break
+            x1 = np.maximum(detections[current, 0], detections[remaining, 0])
+            y1 = np.maximum(detections[current, 1], detections[remaining, 1])
+            x2 = np.minimum(detections[current, 2], detections[remaining, 2])
+            y2 = np.minimum(detections[current, 3], detections[remaining, 3])
+            intersection = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
+            current_area = max(0.0, float(detections[current, 2] - detections[current, 0])) * max(
+                0.0,
+                float(detections[current, 3] - detections[current, 1]),
+            )
+            remaining_area = np.maximum(0.0, detections[remaining, 2] - detections[remaining, 0]) * np.maximum(
+                0.0,
+                detections[remaining, 3] - detections[remaining, 1],
+            )
+            union = current_area + remaining_area - intersection
+            iou = np.divide(intersection, union, out=np.zeros_like(intersection), where=union > 0)
+            order = remaining[iou <= iou_threshold]
+        return detections[np.asarray(keep, dtype=np.int64)].astype(np.float32, copy=False)
+
+    def _merge_detector_results(
+        self,
+        primary: DetectorResult,
+        supplemental: DetectorResult,
+        offset: tuple[float, float],
+    ) -> DetectorResult:
+        crop_candidates = self._offset_detections(supplemental.person_candidates, offset)
+        crop_accepted = self._offset_detections(supplemental.accepted, offset)
+        candidates = self._nms(
+            np.concatenate((primary.person_candidates, crop_candidates), axis=0),
+            self.settings.far_crop_nms_threshold,
+        )
+        accepted = self._nms(
+            np.concatenate((primary.accepted, crop_accepted), axis=0),
+            self.settings.far_crop_nms_threshold,
+        )[: self.settings.max_detections]
+        return DetectorResult(person_candidates=candidates, accepted=accepted)
+
+    def _infer_frame(
+        self,
+        frame: np.ndarray,
+        target_size: tuple[int, int],
+        *,
+        use_far_crop: bool,
+    ) -> DetectorResult:
+        primary = self.detector.infer(frame, target_size)
+        if not self.settings.far_crop_enabled or not use_far_crop:
+            return primary
+
+        source_height, source_width = frame.shape[:2]
+        left, top, right, bottom = self.settings.far_crop_box
+        source_left = int(np.floor(left * source_width))
+        source_top = int(np.floor(top * source_height))
+        source_right = int(np.ceil(right * source_width))
+        source_bottom = int(np.ceil(bottom * source_height))
+        cropped = frame[source_top:source_bottom, source_left:source_right]
+
+        target_width, target_height = target_size
+        target_left = round(source_left * target_width / source_width)
+        target_top = round(source_top * target_height / source_height)
+        target_right = round(source_right * target_width / source_width)
+        target_bottom = round(source_bottom * target_height / source_height)
+        supplemental = self.detector.infer(
+            cropped,
+            (max(1, target_right - target_left), max(1, target_bottom - target_top)),
+        )
+        return self._merge_detector_results(primary, supplemental, (target_left, target_top))
 
     def _tracking_diagnostics(
         self,
@@ -254,7 +348,11 @@ class TrackingService:
 
             # Infer every frame before mutating ByteTrack. Detector failures are safe to retry.
             detector_results = [
-                self.detector.infer(frame, (item.original_width, item.original_height))
+                self._infer_frame(
+                    frame,
+                    (item.original_width, item.original_height),
+                    use_far_crop=state.lap_analyzer is not None,
+                )
                 for frame, item in zip(frames, metadata.frames)
             ]
             frame_results: list[FrameResult] = []

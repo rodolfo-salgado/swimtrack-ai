@@ -191,6 +191,8 @@ La calibración `fixed-camera-v1` proviene de `mpv-shot0001.jpg` (1041×1041) y 
 
 Con `SWIMTRACK_LANE_ROI_ENABLED=true`, las detecciones se asignan al polígono antes de ByteTrack y cada carril usa una instancia independiente del tracker. Las sesiones sin calibración mantienen el tracker global anterior.
 
+`SWIMTRACK_FAR_CROP_ENABLED=true` agrega una segunda inference únicamente para sesiones con calibración `fixed-camera-v1`. El crop normalizado configurable corresponde por default a `(320,120)–(760,560)` en 1080p, se redimensiona al mismo input TensorRT que el frame completo, remapea sus boxes a coordenadas originales y fusiona ambos resultados con NMS antes de la ROI y ByteTrack. El full-frame permanece activo para cubrir el resto del carril.
+
 La baseline seleccionada por el sweep de los videos 1 (`no_lap`) y 6 (`lap`) usa `SWIMTRACK_SCORE_THRESHOLD=0.15`, `SWIMTRACK_MIN_BOX_AREA=250`, `SWIMTRACK_TRACK_THRESHOLD=0.45`, `SWIMTRACK_TRACK_BUFFER=60`, `SWIMTRACK_MATCH_THRESHOLD=0.80` y `SWIMTRACK_LANE_ROI_ENABLED=true`. Estos son también los defaults de `Settings`, Compose y `.env.example`; siguen siendo configurables por environment para repetir experimentos.
 
 ```text

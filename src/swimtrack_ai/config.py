@@ -46,6 +46,12 @@ class Settings:
     match_threshold: float = 0.80
     mot20: bool = False
     lane_roi_enabled: bool = True
+    far_crop_enabled: bool = False
+    far_crop_left: float = 0.2962962963
+    far_crop_top: float = 0.1111111111
+    far_crop_right: float = 0.7037037037
+    far_crop_bottom: float = 0.5185185185
+    far_crop_nms_threshold: float = 0.50
     max_batch_frames: int = 8
     max_frame_bytes: int = 2_000_000
     max_batch_bytes: int = 12_000_000
@@ -68,6 +74,13 @@ class Settings:
             raise ValueError("track_threshold must be between zero and one")
         if not 0.0 <= self.match_threshold <= 1.0:
             raise ValueError("match_threshold must be between zero and one")
+        if not (
+            0.0 <= self.far_crop_left < self.far_crop_right <= 1.0
+            and 0.0 <= self.far_crop_top < self.far_crop_bottom <= 1.0
+        ):
+            raise ValueError("far crop coordinates must define a non-empty normalized rectangle")
+        if not 0.0 <= self.far_crop_nms_threshold <= 1.0:
+            raise ValueError("far_crop_nms_threshold must be between zero and one")
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -95,6 +108,12 @@ class Settings:
             match_threshold=_floating("MATCH_THRESHOLD", 0.80),
             mot20=_boolean("MOT20", False),
             lane_roi_enabled=_boolean("LANE_ROI_ENABLED", True),
+            far_crop_enabled=_boolean("FAR_CROP_ENABLED", False),
+            far_crop_left=_floating("FAR_CROP_LEFT", 0.2962962963),
+            far_crop_top=_floating("FAR_CROP_TOP", 0.1111111111),
+            far_crop_right=_floating("FAR_CROP_RIGHT", 0.7037037037),
+            far_crop_bottom=_floating("FAR_CROP_BOTTOM", 0.5185185185),
+            far_crop_nms_threshold=_floating("FAR_CROP_NMS_THRESHOLD", 0.50),
             max_batch_frames=_integer("MAX_BATCH_FRAMES", 8),
             max_frame_bytes=_integer("MAX_FRAME_BYTES", 2_000_000),
             max_batch_bytes=_integer("MAX_BATCH_BYTES", 12_000_000),
@@ -120,3 +139,12 @@ class Settings:
     @property
     def engine_manifest_path(self) -> Path:
         return self.engine_path.with_suffix(self.engine_path.suffix + ".json")
+
+    @property
+    def far_crop_box(self) -> tuple[float, float, float, float]:
+        return (
+            self.far_crop_left,
+            self.far_crop_top,
+            self.far_crop_right,
+            self.far_crop_bottom,
+        )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -291,6 +292,108 @@ def test_fixed_camera_roi_routes_detections_before_its_lane_tracker(settings: Se
     assert frame["boxes"][0]["lane_id"] == "center"
     assert frame["tracking_diagnostics"]["detector_accepted"]["count"] == 2
     assert frame["tracking_diagnostics"]["lanes"][0]["after_roi"]["count"] == 1
+
+
+def test_fixed_camera_far_crop_is_remapped_before_lane_tracking(settings: Settings) -> None:
+    crop_settings = replace(settings, far_crop_enabled=True)
+
+    class RecordingDetector:
+        def __init__(self) -> None:
+            self.calls: list[tuple[tuple[int, ...], tuple[int, int]]] = []
+
+        def infer(self, frame: np.ndarray, target_size: tuple[int, int]) -> DetectorResult:
+            self.calls.append((frame.shape, target_size))
+            if len(self.calls) == 1:
+                empty = np.empty((0, 5), dtype=np.float32)
+                return DetectorResult(person_candidates=empty, accepted=empty.copy())
+            detection = np.asarray([[10.0, 10.0, 30.0, 25.0, 0.90]], dtype=np.float32)
+            return DetectorResult(person_candidates=detection.copy(), accepted=detection)
+
+        def close(self) -> None:
+            return None
+
+    detector = RecordingDetector()
+    tracker_factory = StubTrackerFactory(crop_settings)
+    app = create_app(
+        settings=crop_settings,
+        detector_factory=lambda _settings: detector,
+        tracker_factory_builder=lambda _settings: tracker_factory,
+    )
+    with TestClient(app) as test_client:
+        created = test_client.post(
+            "/v1/tracking-sessions",
+            headers={"X-Swimtrack-Auth": "test-secret"},
+            json={"fps": 60, "lap_calibration_id": "fixed-camera-v1", "diagnostics": "counts"},
+        )
+        response = submit(test_client, created.json()["session_id"], metadata("far-crop", 0))
+
+    assert created.status_code == 201
+    configuration = created.json()["tracking_configuration"]
+    assert configuration["far_crop_enabled"] is True
+    assert configuration["far_crop_box"] == pytest.approx(list(crop_settings.far_crop_box))
+    assert detector.calls == [((64, 64, 3), (128, 96)), ((27, 28, 3), (56, 41))]
+    np.testing.assert_allclose(
+        tracker_factory.trackers[0].detections[0],
+        [[46.0, 20.0, 66.0, 35.0, 0.90]],
+    )
+    assert response.json()["frames"][0]["boxes"][0]["lane_id"] == "center"
+
+
+def test_far_crop_is_not_used_without_fixed_camera_calibration(settings: Settings) -> None:
+    crop_settings = replace(settings, far_crop_enabled=True)
+
+    class CountingDetector:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def infer(self, _frame: np.ndarray, _target_size: tuple[int, int]) -> DetectorResult:
+            self.calls += 1
+            empty = np.empty((0, 5), dtype=np.float32)
+            return DetectorResult(person_candidates=empty, accepted=empty.copy())
+
+        def close(self) -> None:
+            return None
+
+    detector = CountingDetector()
+    app = create_app(
+        settings=crop_settings,
+        detector_factory=lambda _settings: detector,
+        tracker_factory_builder=StubTrackerFactory,
+    )
+    with TestClient(app) as test_client:
+        session_id = create_session(test_client)
+        response = submit(test_client, session_id, metadata("no-calibration-crop", 0))
+
+    assert response.status_code == 200
+    assert detector.calls == 1
+
+
+def test_far_crop_merge_removes_overlapping_boxes_and_preserves_empty_shape(settings: Settings) -> None:
+    crop_settings = replace(settings, far_crop_enabled=True)
+    empty = np.empty((0, 5), dtype=np.float32)
+    service = TrackingService(
+        crop_settings,
+        detector=SimpleNamespace(close=lambda: None),
+        tracker_factory=lambda _fps: StubTracker(),
+    )
+    primary_box = np.asarray([[10.0, 10.0, 30.0, 30.0, 0.60]], dtype=np.float32)
+    crop_box = np.asarray([[0.0, 0.0, 20.0, 20.0, 0.90]], dtype=np.float32)
+
+    merged = service._merge_detector_results(
+        DetectorResult(person_candidates=primary_box, accepted=primary_box.copy()),
+        DetectorResult(person_candidates=crop_box, accepted=crop_box.copy()),
+        (10.0, 10.0),
+    )
+    merged_empty = service._merge_detector_results(
+        DetectorResult(person_candidates=empty, accepted=empty.copy()),
+        DetectorResult(person_candidates=empty, accepted=empty.copy()),
+        (10.0, 10.0),
+    )
+
+    np.testing.assert_allclose(merged.person_candidates, [[10.0, 10.0, 30.0, 30.0, 0.90]])
+    np.testing.assert_allclose(merged.accepted, [[10.0, 10.0, 30.0, 30.0, 0.90]])
+    assert merged_empty.person_candidates.shape == (0, 5)
+    assert merged_empty.accepted.shape == (0, 5)
 
 
 def test_identical_retry_is_idempotent(client: TestClient) -> None:

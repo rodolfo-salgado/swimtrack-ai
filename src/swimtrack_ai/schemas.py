@@ -25,6 +25,9 @@ class TrackingConfiguration(BaseModel):
     mot20: bool
     lane_roi_enabled: bool
     lane_ids: list[str]
+    far_crop_enabled: bool
+    far_crop_box: list[float] | None
+    far_crop_nms_threshold: float
     effective_lost_buffer_frames: int
     effective_lost_buffer_seconds: float
 
