@@ -173,7 +173,7 @@ Los frames transportados pueden estar redimensionados a 640×640. `original_widt
           "candidate_time_ms": 810.0,
           "window_start_ms": 0.0,
           "window_end_ms": 933.33,
-          "score_version": "trajectory-v1",
+          "score_version": "trajectory-v2",
           "evidence": {"wall":0.96,"approach":0.84,"reversal":0.88,"departure":0.79,"track_quality":0.93}
         }
       ]
@@ -182,7 +182,7 @@ Los frames transportados pueden estar redimensionados a 640×640. `original_widt
 }
 ```
 
-`lap_score` y `no_lap_score` son scores heurísticos continuos, no probabilidades calibradas ni un conteo definitivo. El score combina cercanía a la pared, aproximación, reversión, salida y calidad de tracking. Si falta suficiente trayectoria, `evaluable` es `false` y `no_lap_score` se omite para no convertir ausencia de observación en evidencia de `no_lap`.
+`lap_score` y `no_lap_score` son scores heurísticos continuos, no probabilidades calibradas ni un conteo definitivo. El score combina cercanía a la pared, aproximación, reversión, salida y calidad local de tracking. `trajectory-v2` sólo habilita candidatos después de observar al nadador dentro de la zona interior del carril; así una salida que comienza junto a la pared no se confunde con una vuelta. `candidate_time_ms` identifica el contacto físico y permite deduplicar el mismo candidato entre cuadros. Si falta suficiente trayectoria, `evaluable` es `false` y `no_lap_score` se omite para no convertir ausencia de observación en evidencia de `no_lap`.
 
 ### Calibración fija de carril
 

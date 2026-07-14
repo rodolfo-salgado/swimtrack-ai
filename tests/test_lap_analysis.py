@@ -7,6 +7,7 @@ import pytest
 from swimtrack_ai.lap_analysis import (
     FIXED_CAMERA_CALIBRATION_ID,
     FIXED_CAMERA_CENTER_LANE,
+    LAP_SCORE_VERSION,
     LapAnalyzer,
     fixed_camera_visible_polygon,
 )
@@ -46,6 +47,28 @@ def _run_positions(positions: list[float | None], fps: float = 10.0):
     return result
 
 
+def _run_timeline(
+    positions: list[float | None],
+    *,
+    fps: float = 10.0,
+    track_ids: list[int] | None = None,
+):
+    analyzer = LapAnalyzer(fps=fps, calibration_id=FIXED_CAMERA_CALIBRATION_ID)
+    results = []
+    for index, position in enumerate(positions):
+        track_id = track_ids[index] if track_ids is not None else 7
+        boxes = [_box_at(position, track_id=track_id)] if position is not None else []
+        results.append(
+            analyzer.observe(
+                time_ms=index * 1000.0 / fps,
+                width=1080,
+                height=1080,
+                boxes=boxes,
+            )[0]
+        )
+    return results
+
+
 def test_fixed_camera_polygon_matches_reference_image() -> None:
     assert fixed_camera_visible_polygon() == (
         (0.4463, 0.1583),
@@ -70,6 +93,51 @@ def test_confirmed_near_wall_reversal_gets_high_lap_score() -> None:
     assert result.no_lap_score == pytest.approx(1.0 - result.lap_score)
     assert result.evidence.wall > 0.80
     assert result.evidence.reversal > 0.80
+    assert result.score_version == LAP_SCORE_VERSION
+
+
+def test_near_wall_start_is_not_eligible_without_prior_interior_observation() -> None:
+    waiting = [0.97, 0.975, 0.972, 0.978, 0.974, 0.976, 0.973, 0.977, 0.974, 0.976, 0.973, 0.975]
+    departure = np.linspace(0.97, 0.55, 22)[1:].tolist()
+
+    results = _run_timeline(waiting + departure + [0.55] * 15)
+
+    assert max(result.lap_score for result in results) == 0.0
+    assert all(result.candidate_time_ms is None for result in results)
+
+
+def test_finish_at_wall_without_departure_is_not_a_lap() -> None:
+    approach = np.linspace(0.45, 0.98, 22).tolist()
+
+    results = _run_timeline(approach + [0.98] * 25)
+
+    assert max(result.lap_score for result in results) == 0.0
+
+
+def test_fragmented_turn_with_missing_observations_keeps_positive_score() -> None:
+    positions: list[float | None] = np.linspace(0.45, 0.98, 18).tolist()
+    positions += np.linspace(0.98, 0.55, 18)[1:].tolist()
+    positions += [0.55] * 15
+    positions = [None if index % 5 == 4 else position for index, position in enumerate(positions)]
+    track_ids = [3 if index < 18 else 19 for index in range(len(positions))]
+
+    results = _run_timeline(positions, track_ids=track_ids)
+    best = max(results, key=lambda result: result.lap_score)
+
+    assert best.lap_score > 0.45
+    assert best.endpoint == "near"
+    assert best.track_id in {3, 19}
+
+
+def test_confirmed_far_wall_reversal_gets_high_lap_score() -> None:
+    approach = np.linspace(0.45, 0.02, 16).tolist()
+    departure = np.linspace(0.02, 0.38, 16)[1:].tolist()
+
+    result = _run_positions(approach + departure + [0.38] * 15)
+
+    assert result.evaluable
+    assert result.endpoint == "far"
+    assert result.lap_score > 0.70
 
 
 def test_monotonic_middle_trajectory_is_no_lap() -> None:

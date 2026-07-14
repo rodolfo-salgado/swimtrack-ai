@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter, deque
+from collections import deque
 from dataclasses import dataclass, field
 from math import prod, sqrt
 
@@ -18,7 +18,7 @@ from swimtrack_ai.calibration import (
 )
 from swimtrack_ai.schemas import BoundingBox, LaneLapScore, LapEvidence
 
-LAP_SCORE_VERSION = "trajectory-v1"
+LAP_SCORE_VERSION = "trajectory-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +34,7 @@ class _LaneRuntime:
     calibration: LaneCalibration
     image_to_lane: np.ndarray
     history: deque[_Observation] = field(default_factory=deque)
+    armed_since_ms: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,15 @@ def _slope(observations: list[_Observation]) -> float | None:
     return float(np.dot(centered_times, positions - positions.mean()) / denominator)
 
 
+def _observation_quality(observations: list[_Observation]) -> float:
+    valid = [item for item in observations if item.position is not None]
+    if not observations or not valid:
+        return 0.0
+    coverage = len(valid) / len(observations)
+    mean_confidence = float(np.mean([item.confidence for item in valid]))
+    return _clip01(coverage * sqrt(max(0.0, mean_confidence)))
+
+
 class LapAnalyzer:
     """Produce a heuristic lap/no-lap score from tracked swimmer trajectories.
 
@@ -84,6 +94,7 @@ class LapAnalyzer:
     reference_speed = 0.15
     reference_departure = 0.08
     lane_margin = 0.05
+    interior_zone = (0.20, 0.80)
 
     def __init__(self, fps: float, calibration_id: str) -> None:
         self.fps = fps
@@ -109,6 +120,12 @@ class LapAnalyzer:
                 raise ValueError("Lap observations must not move backwards in time")
             observation = self._select_observation(runtime, time_ms, width, height, boxes)
             runtime.history.append(observation)
+            if (
+                runtime.armed_since_ms is None
+                and observation.position is not None
+                and self.interior_zone[0] <= observation.position <= self.interior_zone[1]
+            ):
+                runtime.armed_since_ms = time_ms
             cutoff = time_ms - self.history_ms
             while runtime.history and runtime.history[0].time_ms < cutoff:
                 runtime.history.popleft()
@@ -151,19 +168,20 @@ class LapAnalyzer:
     def _score(self, runtime: _LaneRuntime, current: _Observation) -> LaneLapScore:
         history = list(runtime.history)
         valid = [item for item in history if item.position is not None]
-        coverage = len(valid) / len(history) if history else 0.0
-        mean_confidence = float(np.mean([item.confidence for item in valid])) if valid else 0.0
-        id_counts = Counter(item.track_id for item in valid if item.track_id is not None)
-        dominant_share = max(id_counts.values()) / len(valid) if id_counts and valid else 0.0
-        id_consistency = 0.75 + 0.25 * dominant_share if valid else 0.0
-        quality = _clip01(coverage * sqrt(max(0.0, mean_confidence * id_consistency)))
+        quality = _observation_quality(history)
         span_ms = history[-1].time_ms - history[0].time_ms if len(history) > 1 else 0.0
         min_samples = max(5, round(self.fps * 0.5))
         evaluable = span_ms >= self.context_before_ms + self.context_after_ms and len(valid) >= min_samples
 
-        best = self._best_candidate(valid, history[0].time_ms, history[-1].time_ms, quality)
+        best = self._best_candidate(
+            history,
+            history[0].time_ms,
+            history[-1].time_ms,
+            runtime.armed_since_ms,
+        )
         lap_score = best.score if best is not None and evaluable else 0.0
         no_lap_score = 1.0 - lap_score if evaluable else None
+        score_quality = best.evidence.track_quality if best is not None else quality
         empty_evidence = LapEvidence(
             wall=0.0,
             approach=0.0,
@@ -176,7 +194,7 @@ class LapAnalyzer:
             track_id=best.track_id if best is not None else current.track_id,
             lap_score=_clip01(lap_score),
             no_lap_score=_clip01(no_lap_score) if no_lap_score is not None else None,
-            observation_quality=quality,
+            observation_quality=score_quality,
             evaluable=evaluable,
             longitudinal_position=current.position,
             endpoint=best.endpoint if best is not None else None,
@@ -189,15 +207,19 @@ class LapAnalyzer:
 
     def _best_candidate(
         self,
-        valid: list[_Observation],
+        history: list[_Observation],
         window_start_ms: float,
         window_end_ms: float,
-        quality: float,
+        armed_since_ms: float | None,
     ) -> _CandidateScore | None:
+        if armed_since_ms is None:
+            return None
+        valid = [item for item in history if item.position is not None]
         best: _CandidateScore | None = None
         for candidate in valid:
             if (
-                candidate.time_ms < window_start_ms + self.context_before_ms
+                candidate.time_ms <= armed_since_ms
+                or candidate.time_ms < window_start_ms + self.context_before_ms
                 or candidate.time_ms > window_end_ms - self.context_after_ms
             ):
                 continue
@@ -206,32 +228,27 @@ class LapAnalyzer:
             for endpoint, wall_distance in endpoint_distances.items():
                 if wall_distance > self.endpoint_zone:
                     continue
-                scored = self._score_candidate(valid, candidate, endpoint, wall_distance, quality)
+                scored = self._score_candidate(history, candidate, endpoint, wall_distance)
                 if scored is not None and (best is None or scored.score > best.score):
                     best = scored
         return best
 
     def _score_candidate(
         self,
-        valid: list[_Observation],
+        history: list[_Observation],
         candidate: _Observation,
         endpoint: str,
         wall_distance: float,
-        quality: float,
     ) -> _CandidateScore | None:
         before = [
             item
-            for item in valid
-            if candidate.time_ms - self.context_before_ms
-            <= item.time_ms
-            <= candidate.time_ms - self.candidate_guard_ms
+            for item in history
+            if candidate.time_ms - self.context_before_ms <= item.time_ms <= candidate.time_ms - self.candidate_guard_ms
         ]
         after = [
             item
-            for item in valid
-            if candidate.time_ms + self.candidate_guard_ms
-            <= item.time_ms
-            <= candidate.time_ms + self.context_after_ms
+            for item in history
+            if candidate.time_ms + self.candidate_guard_ms <= item.time_ms <= candidate.time_ms + self.context_after_ms
         ]
         approach_slope = _slope(before)
         departure_slope = _slope(after)
@@ -246,13 +263,15 @@ class LapAnalyzer:
         reversal = sqrt(approach * outbound)
 
         assert candidate.position is not None
-        tail_count = max(1, len(after) // 4)
-        departure_position = float(np.median([item.position for item in after[-tail_count:]]))
+        valid_after = [item for item in after if item.position is not None]
+        tail_count = max(1, len(valid_after) // 4)
+        departure_position = float(np.median([item.position for item in valid_after[-tail_count:]]))
         departure_distance = (
             departure_position - candidate.position if endpoint == "far" else candidate.position - departure_position
         )
         departure = _clip01(departure_distance / self.reference_departure)
         wall = _clip01((self.endpoint_zone - wall_distance) / self.endpoint_zone)
+        quality = _observation_quality([*before, candidate, *after])
         components = (wall, approach, reversal, departure)
         evidence_score = prod(components) ** (1.0 / len(components)) if all(value > 0 for value in components) else 0.0
         evidence = LapEvidence(
