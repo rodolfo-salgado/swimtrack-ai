@@ -156,6 +156,31 @@ def test_each_wall_visit_has_one_episode_id_and_rearms_in_the_interior() -> None
     assert positive_episode_ids == {1, 2}
 
 
+def test_far_wall_reversal_survives_a_long_underwater_gap() -> None:
+    approach = np.linspace(0.42, 0.03, 18).tolist()
+    underwater = [None] * 45
+    departure = np.linspace(0.04, 0.42, 18).tolist()
+
+    results = _run_timeline(approach + underwater + departure + [0.42] * 15)
+    best = max(results, key=lambda result: result.lap_score)
+
+    assert best.endpoint == "far"
+    assert best.candidate_episode_id == 1
+    assert best.lap_score > 0.20
+    assert best.candidate_time_ms is not None
+    assert best.candidate_time_ms < 2_000
+
+
+def test_gap_longer_than_supported_occlusion_is_not_joined() -> None:
+    approach = np.linspace(0.42, 0.03, 18).tolist()
+    underwater = [None] * 65
+    departure = np.linspace(0.04, 0.42, 18).tolist()
+
+    results = _run_timeline(approach + underwater + departure + [0.42] * 15)
+
+    assert max(result.lap_score for result in results) == 0.0
+
+
 def test_monotonic_middle_trajectory_is_no_lap() -> None:
     result = _run_positions(np.linspace(0.20, 0.80, 46).tolist())
 

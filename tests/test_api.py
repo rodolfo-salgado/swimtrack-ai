@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 from swimtrack_ai.api import create_app
 from swimtrack_ai.config import Settings
 from swimtrack_ai.detectors import DetectorResult
+from swimtrack_ai.schemas import BoundingBox
+from swimtrack_ai.service import TrackingService
 from swimtrack_ai.tracker import TrackerUpdate
 
 
@@ -164,7 +166,27 @@ def test_fixed_camera_lap_scoring_is_opt_in(client: TestClient) -> None:
     assert score["lane_id"] == "center"
     assert score["lap_score"] == 0.0
     assert score["evaluable"] is False
-    assert score["score_version"] == "trajectory-v3"
+    assert score["score_version"] == "trajectory-v4"
+
+
+def test_lap_analysis_falls_back_to_lane_detections_without_active_tracks() -> None:
+    routed = {"center": np.asarray([[10.0, 20.0, 30.0, 40.0, 0.25]], dtype=np.float32)}
+
+    fallback = TrackingService._lap_analysis_boxes([], routed, (128, 96))
+
+    assert len(fallback) == 1
+    assert fallback[0].id == -1
+    assert fallback[0].lane_id == "center"
+    assert fallback[0].conf == pytest.approx(0.25)
+
+
+def test_lap_analysis_prefers_active_lane_tracks_over_raw_fallback() -> None:
+    tracked = BoundingBox(id=7, lane_id="center", x1=10, y1=20, x2=30, y2=40, conf=0.90)
+    routed = {"center": np.asarray([[11.0, 21.0, 31.0, 41.0, 0.25]], dtype=np.float32)}
+
+    analysis_boxes = TrackingService._lap_analysis_boxes([tracked], routed, (128, 96))
+
+    assert analysis_boxes == [tracked]
 
 
 def test_tracking_diagnostics_are_opt_in(client: TestClient) -> None:

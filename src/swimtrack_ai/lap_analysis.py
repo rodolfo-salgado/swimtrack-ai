@@ -18,7 +18,7 @@ from swimtrack_ai.calibration import (
 )
 from swimtrack_ai.schemas import BoundingBox, LaneLapScore, LapEvidence
 
-LAP_SCORE_VERSION = "trajectory-v3"
+LAP_SCORE_VERSION = "trajectory-v4"
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,9 +98,10 @@ class LapAnalyzer:
     threshold after ground-truth annotations exist.
     """
 
-    history_ms = 4_500.0
+    history_ms = 10_000.0
     context_before_ms = 1_000.0
     context_after_ms = 1_000.0
+    max_side_gap_ms = 6_000.0
     candidate_guard_ms = 100.0
     endpoint_zone = 0.15
     reference_speed = 0.15
@@ -177,6 +178,14 @@ class LapAnalyzer:
         boxes: list[BoundingBox],
     ) -> _Observation:
         candidates: list[tuple[float, float, BoundingBox]] = []
+        recent_position = next(
+            (
+                item.position
+                for item in reversed(runtime.history)
+                if item.position is not None and time_ms - item.time_ms <= self.max_side_gap_ms
+            ),
+            None,
+        )
         for box in boxes:
             center = np.asarray(
                 [[[(box.x1 + box.x2) / (2.0 * width), (box.y1 + box.y2) / (2.0 * height)]]],
@@ -188,7 +197,10 @@ class LapAnalyzer:
                 and -self.lane_margin <= position <= 1.0 + self.lane_margin
             ):
                 center_penalty = abs(float(lane_x) - 0.5) * 0.05
-                candidates.append((float(box.conf) - center_penalty, float(position), box))
+                continuity_penalty = (
+                    abs(float(position) - recent_position) * 0.25 if recent_position is not None else 0.0
+                )
+                candidates.append((float(box.conf) - center_penalty - continuity_penalty, float(position), box))
 
         if not candidates:
             return _Observation(time_ms=time_ms, position=None, confidence=None, track_id=None)
@@ -198,7 +210,7 @@ class LapAnalyzer:
             time_ms=time_ms,
             position=_clip01(position),
             confidence=_clip01(box.conf),
-            track_id=box.id,
+            track_id=box.id if box.id > 0 else None,
         )
 
     def _score(self, runtime: _LaneRuntime, current: _Observation) -> LaneLapScore:
@@ -251,6 +263,7 @@ class LapAnalyzer:
     ) -> _CandidateScore | None:
         if not episodes:
             return None
+        latest_episode = episodes[-1]
         valid = [item for item in history if item.position is not None]
         best: _CandidateScore | None = None
         for candidate in valid:
@@ -264,7 +277,7 @@ class LapAnalyzer:
             for endpoint, wall_distance in endpoint_distances.items():
                 if wall_distance > self.endpoint_zone:
                     continue
-                episode = self._episode_for_candidate(episodes, endpoint, candidate.time_ms)
+                episode = self._episode_for_candidate([latest_episode], endpoint, candidate.time_ms)
                 if episode is None:
                     continue
                 scored = self._score_candidate(history, candidate, endpoint, wall_distance, episode.episode_id)
@@ -293,16 +306,8 @@ class LapAnalyzer:
         wall_distance: float,
         episode_id: int,
     ) -> _CandidateScore | None:
-        before = [
-            item
-            for item in history
-            if candidate.time_ms - self.context_before_ms <= item.time_ms <= candidate.time_ms - self.candidate_guard_ms
-        ]
-        after = [
-            item
-            for item in history
-            if candidate.time_ms + self.candidate_guard_ms <= item.time_ms <= candidate.time_ms + self.context_after_ms
-        ]
+        before = self._side_window(history, candidate.time_ms, before=True)
+        after = self._side_window(history, candidate.time_ms, before=False)
         approach_slope = _slope(before)
         departure_slope = _slope(after)
         if approach_slope is None or departure_slope is None:
@@ -324,7 +329,14 @@ class LapAnalyzer:
         )
         departure = _clip01(departure_distance / self.reference_departure)
         wall = _clip01((self.endpoint_zone - wall_distance) / self.endpoint_zone)
-        quality = _observation_quality([*before, candidate, *after])
+        valid_before = [item for item in before if item.position is not None]
+        before_gap_ms = candidate.time_ms - valid_before[-1].time_ms
+        after_gap_ms = valid_after[0].time_ms - candidate.time_ms
+        gap_quality = sqrt(
+            min(1.0, self.context_before_ms / max(self.context_before_ms, before_gap_ms))
+            * min(1.0, self.context_after_ms / max(self.context_after_ms, after_gap_ms))
+        )
+        quality = _observation_quality([*before, candidate, *after]) * gap_quality
         components = (wall, approach, reversal, departure)
         evidence_score = prod(components) ** (1.0 / len(components)) if all(value > 0 for value in components) else 0.0
         evidence = LapEvidence(
@@ -342,3 +354,38 @@ class LapAnalyzer:
             track_id=candidate.track_id,
             evidence=evidence,
         )
+
+    def _side_window(
+        self,
+        history: list[_Observation],
+        candidate_time_ms: float,
+        *,
+        before: bool,
+    ) -> list[_Observation]:
+        if before:
+            valid = [
+                item
+                for item in history
+                if item.position is not None
+                and candidate_time_ms - self.max_side_gap_ms
+                <= item.time_ms
+                <= candidate_time_ms - self.candidate_guard_ms
+            ]
+            if not valid:
+                return []
+            window_end_ms = valid[-1].time_ms
+            window_start_ms = window_end_ms - self.context_before_ms
+        else:
+            valid = [
+                item
+                for item in history
+                if item.position is not None
+                and candidate_time_ms + self.candidate_guard_ms
+                <= item.time_ms
+                <= candidate_time_ms + self.max_side_gap_ms
+            ]
+            if not valid:
+                return []
+            window_start_ms = valid[0].time_ms
+            window_end_ms = window_start_ms + self.context_after_ms
+        return [item for item in history if window_start_ms <= item.time_ms <= window_end_ms]

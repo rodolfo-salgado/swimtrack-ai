@@ -174,7 +174,7 @@ Los frames transportados pueden estar redimensionados a 640×640. `original_widt
           "candidate_episode_id": 1,
           "window_start_ms": 0.0,
           "window_end_ms": 933.33,
-          "score_version": "trajectory-v3",
+          "score_version": "trajectory-v4",
           "evidence": {"wall":0.96,"approach":0.84,"reversal":0.88,"departure":0.79,"track_quality":0.93}
         }
       ]
@@ -183,7 +183,7 @@ Los frames transportados pueden estar redimensionados a 640×640. `original_widt
 }
 ```
 
-`lap_score` y `no_lap_score` son scores heurísticos continuos, no probabilidades calibradas ni un conteo definitivo. El score combina cercanía a la pared, aproximación, reversión, salida y calidad local de tracking. `trajectory-v3` sólo habilita candidatos después de observar al nadador dentro de la zona interior del carril; así una salida que comienza junto a la pared no se confunde con una vuelta. `candidate_episode_id` identifica una visita completa a la pared y agrupa todos sus candidatos, mientras que `candidate_time_ms` conserva el instante estimado de contacto. Si falta suficiente trayectoria, `evaluable` es `false` y `no_lap_score` se omite para no convertir ausencia de observación en evidencia de `no_lap`.
+`lap_score` y `no_lap_score` son scores heurísticos continuos, no probabilidades calibradas ni un conteo definitivo. El score combina cercanía a la pared, aproximación, reversión, salida y calidad local de tracking. `trajectory-v4` sólo habilita candidatos después de observar al nadador dentro de la zona interior del carril; así una salida que comienza junto a la pared no se confunde con una vuelta. Cuando ByteTrack no mantiene un track, el análisis usa las detecciones de la ROI del carril y puede unir ambos lados de una oclusión de hasta 6 segundos, reduciendo la confianza según la duración del gap. `candidate_episode_id` identifica una visita completa a la pared y agrupa todos sus candidatos, mientras que `candidate_time_ms` conserva el instante estimado de contacto. Si falta suficiente trayectoria, `evaluable` es `false` y `no_lap_score` se omite para no convertir ausencia de observación en evidencia de `no_lap`.
 
 ### Calibración fija de carril
 

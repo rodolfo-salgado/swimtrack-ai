@@ -156,6 +156,33 @@ class TrackingService:
             ],
         )
 
+    @staticmethod
+    def _lap_analysis_boxes(
+        tracked_boxes: list[BoundingBox],
+        routed_detections: dict[str, np.ndarray],
+        image_size: tuple[int, int],
+    ) -> list[BoundingBox]:
+        result = tracked_boxes.copy()
+        tracked_lane_ids = {box.lane_id for box in tracked_boxes}
+        width, height = image_size
+        for lane_id, detections in routed_detections.items():
+            if lane_id in tracked_lane_ids:
+                continue
+            for detection in detections:
+                x1, y1, x2, y2, confidence = np.asarray(detection, dtype=float)
+                result.append(
+                    BoundingBox(
+                        id=-1,
+                        lane_id=None if lane_id == "global" else lane_id,
+                        x1=max(0.0, min(float(x1), width - 1)),
+                        y1=max(0.0, min(float(y1), height - 1)),
+                        x2=max(0.0, min(float(x2), width - 1)),
+                        y2=max(0.0, min(float(y2), height - 1)),
+                        conf=float(confidence),
+                    )
+                )
+        return result
+
     def delete_session(self, session_id: str) -> None:
         with self._sessions_lock:
             state = self._sessions.get(session_id)
@@ -254,6 +281,7 @@ class TrackingService:
                                     conf=float(track.score),
                                 )
                             )
+                    lap_analysis_boxes = self._lap_analysis_boxes(boxes, routed_detections, image_size)
                     frame_results.append(
                         FrameResult(
                             frame_index=item.frame_index,
@@ -266,7 +294,7 @@ class TrackingService:
                                     time_ms=item.time_ms,
                                     width=item.original_width,
                                     height=item.original_height,
-                                    boxes=boxes,
+                                    boxes=lap_analysis_boxes,
                                 )
                                 if state.lap_analyzer is not None
                                 else None
