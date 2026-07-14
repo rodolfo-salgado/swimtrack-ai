@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -7,6 +9,7 @@ class CreateSessionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     fps: float = Field(default=60.0, gt=0, le=240)
+    lap_calibration_id: Literal["fixed-camera-v1"] | None = None
 
 
 class SessionCreated(BaseModel):
@@ -52,12 +55,37 @@ class BoundingBox(BaseModel):
     class_id: int = 0
 
 
+class LapEvidence(BaseModel):
+    wall: float = Field(ge=0, le=1)
+    approach: float = Field(ge=0, le=1)
+    reversal: float = Field(ge=0, le=1)
+    departure: float = Field(ge=0, le=1)
+    track_quality: float = Field(ge=0, le=1)
+
+
+class LaneLapScore(BaseModel):
+    lane_id: str
+    track_id: int | None = None
+    lap_score: float = Field(ge=0, le=1)
+    no_lap_score: float | None = Field(default=None, ge=0, le=1)
+    observation_quality: float = Field(ge=0, le=1)
+    evaluable: bool
+    longitudinal_position: float | None = Field(default=None, ge=0, le=1)
+    endpoint: Literal["far", "near"] | None = None
+    candidate_time_ms: float | None = Field(default=None, ge=0)
+    window_start_ms: float = Field(ge=0)
+    window_end_ms: float = Field(ge=0)
+    score_version: str
+    evidence: LapEvidence
+
+
 class FrameResult(BaseModel):
     frame_index: int
     time_ms: float
     width: int
     height: int
     boxes: list[BoundingBox]
+    lap_scores: list[LaneLapScore] | None = None
 
 
 class BatchResult(BaseModel):

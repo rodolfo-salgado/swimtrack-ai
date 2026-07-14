@@ -1,0 +1,306 @@
+from __future__ import annotations
+
+from collections import Counter, deque
+from dataclasses import dataclass, field
+from math import prod, sqrt
+
+import cv2
+import numpy as np
+
+from swimtrack_ai.schemas import BoundingBox, LaneLapScore, LapEvidence
+
+FIXED_CAMERA_CALIBRATION_ID = "fixed-camera-v1"
+LAP_SCORE_VERSION = "trajectory-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class LaneCalibration:
+    """Perspective calibration expressed relative to image width and height.
+
+    ``source_quad`` is the complete lane on the pool plane, including the two
+    near-wall corners that lie outside the camera frame. ``visible_polygon`` is
+    that trapezoid clipped to the image. Coordinates were measured from
+    ``mpv-shot0001.jpg`` (1041x1041) and normalized so the same calibration can
+    be used with the original 1080x1080 videos.
+    """
+
+    lane_id: str
+    source_quad: tuple[tuple[float, float], ...]
+    visible_polygon: tuple[tuple[float, float], ...]
+
+
+FIXED_CAMERA_CENTER_LANE = LaneCalibration(
+    lane_id="center",
+    source_quad=(
+        (0.4463, 0.1583),
+        (0.5815, 0.1583),
+        (1.2603, 0.9769),
+        (-0.2507, 0.9769),
+    ),
+    visible_polygon=(
+        (0.4463, 0.1583),
+        (0.5815, 0.1583),
+        (1.0000, 0.6630),
+        (1.0000, 0.9769),
+        (0.0000, 0.9769),
+        (0.0000, 0.6824),
+    ),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _Observation:
+    time_ms: float
+    position: float | None
+    confidence: float | None
+    track_id: int | None
+
+
+@dataclass(slots=True)
+class _LaneRuntime:
+    calibration: LaneCalibration
+    image_to_lane: np.ndarray
+    history: deque[_Observation] = field(default_factory=deque)
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateScore:
+    score: float
+    endpoint: str
+    candidate_time_ms: float
+    track_id: int | None
+    evidence: LapEvidence
+
+
+def fixed_camera_visible_polygon() -> tuple[tuple[float, float], ...]:
+    """Return the normalized polygon of the only lane visible end-to-end."""
+
+    return FIXED_CAMERA_CENTER_LANE.visible_polygon
+
+
+def _perspective_matrix(calibration: LaneCalibration) -> np.ndarray:
+    source = np.asarray(calibration.source_quad, dtype=np.float32)
+    target = np.asarray(((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)), dtype=np.float32)
+    return cv2.getPerspectiveTransform(source, target)
+
+
+def _clip01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _slope(observations: list[_Observation]) -> float | None:
+    valid = [item for item in observations if item.position is not None]
+    if len(valid) < 3 or valid[-1].time_ms - valid[0].time_ms < 300:
+        return None
+    times = np.asarray([(item.time_ms - valid[0].time_ms) / 1000.0 for item in valid], dtype=float)
+    positions = np.asarray([item.position for item in valid], dtype=float)
+    centered_times = times - times.mean()
+    denominator = float(np.dot(centered_times, centered_times))
+    if denominator <= 1e-9:
+        return None
+    return float(np.dot(centered_times, positions - positions.mean()) / denominator)
+
+
+class LapAnalyzer:
+    """Produce a heuristic lap/no-lap score from tracked swimmer trajectories.
+
+    The score is intentionally not a calibrated probability. It records the
+    geometric and temporal evidence needed to fit weights and a decision
+    threshold after ground-truth annotations exist.
+    """
+
+    history_ms = 4_500.0
+    context_before_ms = 1_000.0
+    context_after_ms = 1_000.0
+    candidate_guard_ms = 100.0
+    endpoint_zone = 0.15
+    reference_speed = 0.15
+    reference_departure = 0.08
+    lane_margin = 0.05
+
+    def __init__(self, fps: float, calibration_id: str) -> None:
+        if calibration_id != FIXED_CAMERA_CALIBRATION_ID:
+            raise ValueError(f"Unsupported lap calibration: {calibration_id}")
+        self.fps = fps
+        calibration = FIXED_CAMERA_CENTER_LANE
+        self._lanes = {
+            calibration.lane_id: _LaneRuntime(
+                calibration=calibration,
+                image_to_lane=_perspective_matrix(calibration),
+            )
+        }
+
+    def observe(
+        self,
+        *,
+        time_ms: float,
+        width: int,
+        height: int,
+        boxes: list[BoundingBox],
+    ) -> list[LaneLapScore]:
+        results: list[LaneLapScore] = []
+        for runtime in self._lanes.values():
+            if runtime.history and time_ms < runtime.history[-1].time_ms:
+                raise ValueError("Lap observations must not move backwards in time")
+            observation = self._select_observation(runtime, time_ms, width, height, boxes)
+            runtime.history.append(observation)
+            cutoff = time_ms - self.history_ms
+            while runtime.history and runtime.history[0].time_ms < cutoff:
+                runtime.history.popleft()
+            results.append(self._score(runtime, observation))
+        return results
+
+    def _select_observation(
+        self,
+        runtime: _LaneRuntime,
+        time_ms: float,
+        width: int,
+        height: int,
+        boxes: list[BoundingBox],
+    ) -> _Observation:
+        candidates: list[tuple[float, float, BoundingBox]] = []
+        for box in boxes:
+            center = np.asarray(
+                [[[(box.x1 + box.x2) / (2.0 * width), (box.y1 + box.y2) / (2.0 * height)]]],
+                dtype=np.float32,
+            )
+            lane_x, position = cv2.perspectiveTransform(center, runtime.image_to_lane)[0, 0]
+            if (
+                -self.lane_margin <= lane_x <= 1.0 + self.lane_margin
+                and -self.lane_margin <= position <= 1.0 + self.lane_margin
+            ):
+                center_penalty = abs(float(lane_x) - 0.5) * 0.05
+                candidates.append((float(box.conf) - center_penalty, float(position), box))
+
+        if not candidates:
+            return _Observation(time_ms=time_ms, position=None, confidence=None, track_id=None)
+
+        _rank, position, box = max(candidates, key=lambda item: item[0])
+        return _Observation(
+            time_ms=time_ms,
+            position=_clip01(position),
+            confidence=_clip01(box.conf),
+            track_id=box.id,
+        )
+
+    def _score(self, runtime: _LaneRuntime, current: _Observation) -> LaneLapScore:
+        history = list(runtime.history)
+        valid = [item for item in history if item.position is not None]
+        coverage = len(valid) / len(history) if history else 0.0
+        mean_confidence = float(np.mean([item.confidence for item in valid])) if valid else 0.0
+        id_counts = Counter(item.track_id for item in valid if item.track_id is not None)
+        dominant_share = max(id_counts.values()) / len(valid) if id_counts and valid else 0.0
+        id_consistency = 0.75 + 0.25 * dominant_share if valid else 0.0
+        quality = _clip01(coverage * sqrt(max(0.0, mean_confidence * id_consistency)))
+        span_ms = history[-1].time_ms - history[0].time_ms if len(history) > 1 else 0.0
+        min_samples = max(5, round(self.fps * 0.5))
+        evaluable = span_ms >= self.context_before_ms + self.context_after_ms and len(valid) >= min_samples
+
+        best = self._best_candidate(valid, history[0].time_ms, history[-1].time_ms, quality)
+        lap_score = best.score if best is not None and evaluable else 0.0
+        no_lap_score = 1.0 - lap_score if evaluable else None
+        empty_evidence = LapEvidence(
+            wall=0.0,
+            approach=0.0,
+            reversal=0.0,
+            departure=0.0,
+            track_quality=quality,
+        )
+        return LaneLapScore(
+            lane_id=runtime.calibration.lane_id,
+            track_id=best.track_id if best is not None else current.track_id,
+            lap_score=_clip01(lap_score),
+            no_lap_score=_clip01(no_lap_score) if no_lap_score is not None else None,
+            observation_quality=quality,
+            evaluable=evaluable,
+            longitudinal_position=current.position,
+            endpoint=best.endpoint if best is not None else None,
+            candidate_time_ms=best.candidate_time_ms if best is not None else None,
+            window_start_ms=history[0].time_ms,
+            window_end_ms=history[-1].time_ms,
+            score_version=LAP_SCORE_VERSION,
+            evidence=best.evidence if best is not None else empty_evidence,
+        )
+
+    def _best_candidate(
+        self,
+        valid: list[_Observation],
+        window_start_ms: float,
+        window_end_ms: float,
+        quality: float,
+    ) -> _CandidateScore | None:
+        best: _CandidateScore | None = None
+        for candidate in valid:
+            if (
+                candidate.time_ms < window_start_ms + self.context_before_ms
+                or candidate.time_ms > window_end_ms - self.context_after_ms
+            ):
+                continue
+            assert candidate.position is not None
+            endpoint_distances = {"far": candidate.position, "near": 1.0 - candidate.position}
+            for endpoint, wall_distance in endpoint_distances.items():
+                if wall_distance > self.endpoint_zone:
+                    continue
+                scored = self._score_candidate(valid, candidate, endpoint, wall_distance, quality)
+                if scored is not None and (best is None or scored.score > best.score):
+                    best = scored
+        return best
+
+    def _score_candidate(
+        self,
+        valid: list[_Observation],
+        candidate: _Observation,
+        endpoint: str,
+        wall_distance: float,
+        quality: float,
+    ) -> _CandidateScore | None:
+        before = [
+            item
+            for item in valid
+            if candidate.time_ms - self.context_before_ms
+            <= item.time_ms
+            <= candidate.time_ms - self.candidate_guard_ms
+        ]
+        after = [
+            item
+            for item in valid
+            if candidate.time_ms + self.candidate_guard_ms
+            <= item.time_ms
+            <= candidate.time_ms + self.context_after_ms
+        ]
+        approach_slope = _slope(before)
+        departure_slope = _slope(after)
+        if approach_slope is None or departure_slope is None:
+            return None
+
+        direction = -1.0 if endpoint == "far" else 1.0
+        inbound_speed = direction * approach_slope
+        outbound_speed = -direction * departure_slope
+        approach = _clip01(inbound_speed / self.reference_speed)
+        outbound = _clip01(outbound_speed / self.reference_speed)
+        reversal = sqrt(approach * outbound)
+
+        assert candidate.position is not None
+        tail_count = max(1, len(after) // 4)
+        departure_position = float(np.median([item.position for item in after[-tail_count:]]))
+        departure_distance = (
+            departure_position - candidate.position if endpoint == "far" else candidate.position - departure_position
+        )
+        departure = _clip01(departure_distance / self.reference_departure)
+        wall = _clip01((self.endpoint_zone - wall_distance) / self.endpoint_zone)
+        components = (wall, approach, reversal, departure)
+        evidence_score = prod(components) ** (1.0 / len(components)) if all(value > 0 for value in components) else 0.0
+        evidence = LapEvidence(
+            wall=wall,
+            approach=approach,
+            reversal=reversal,
+            departure=departure,
+            track_quality=quality,
+        )
+        return _CandidateScore(
+            score=_clip01(evidence_score * quality),
+            endpoint=endpoint,
+            candidate_time_ms=candidate.time_ms,
+            track_id=candidate.track_id,
+            evidence=evidence,
+        )

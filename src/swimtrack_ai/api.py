@@ -162,6 +162,7 @@ def create_app(
     @app.post(
         "/v1/tracking-sessions",
         response_model=SessionCreated,
+        response_model_exclude_none=True,
         status_code=201,
         dependencies=[Depends(authenticated)],
         tags=["tracking"],
@@ -171,7 +172,7 @@ def create_app(
         payload: Annotated[CreateSessionRequest, Body()] = CreateSessionRequest(),
     ) -> SessionCreated:
         service = ready_service(request)
-        return await anyio.to_thread.run_sync(service.create_session, payload.fps)
+        return await anyio.to_thread.run_sync(service.create_session, payload.fps, payload.lap_calibration_id)
 
     @app.delete(
         "/v1/tracking-sessions/{session_id}",
@@ -187,6 +188,7 @@ def create_app(
     @app.post(
         "/v1/tracking-sessions/{session_id}/batches",
         response_model=BatchResult,
+        response_model_exclude_none=True,
         dependencies=[Depends(authenticated)],
         tags=["tracking"],
     )

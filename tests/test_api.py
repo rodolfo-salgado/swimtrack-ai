@@ -131,12 +131,41 @@ def test_session_batch_coordinates_and_delete(client: TestClient) -> None:
     assert body["frames"][0]["height"] == 96
     assert body["frames"][0]["boxes"][0]["id"] == 1
     assert body["frames"][0]["boxes"][0]["x1"] >= 14
+    assert "lap_scores" not in body["frames"][0]
     deleted = client.delete(
         f"/v1/tracking-sessions/{session_id}",
         headers={"X-Swimtrack-Auth": "test-secret"},
     )
     assert deleted.status_code == 204
     assert submit(client, session_id, metadata("batch-1", 1, 1)).status_code == 404
+
+
+def test_fixed_camera_lap_scoring_is_opt_in(client: TestClient) -> None:
+    created = client.post(
+        "/v1/tracking-sessions",
+        headers={"X-Swimtrack-Auth": "test-secret"},
+        json={"fps": 60, "lap_calibration_id": "fixed-camera-v1"},
+    )
+    assert created.status_code == 201
+
+    response = submit(client, created.json()["session_id"], metadata("lap-batch", 0))
+
+    assert response.status_code == 200, response.text
+    score = response.json()["frames"][0]["lap_scores"][0]
+    assert score["lane_id"] == "center"
+    assert score["lap_score"] == 0.0
+    assert score["evaluable"] is False
+    assert score["score_version"] == "trajectory-v1"
+
+
+def test_unknown_lap_calibration_is_rejected(client: TestClient) -> None:
+    response = client.post(
+        "/v1/tracking-sessions",
+        headers={"X-Swimtrack-Auth": "test-secret"},
+        json={"fps": 60, "lap_calibration_id": "unknown-camera"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_identical_retry_is_idempotent(client: TestClient) -> None:

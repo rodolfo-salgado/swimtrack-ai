@@ -51,7 +51,7 @@ uv run --locked --no-dev --extra native-gpu --env-file .env.native -- python -c 
 uv run --locked --no-dev --extra native-gpu --env-file .env.native -- python -c "import tensorrt as trt; print(trt.__version__); assert trt.Builder(trt.Logger())"
 ```
 
-Inicia exactamente un worker y mantén el servicio ligado a localhost cuando se acceda por SSH tunnel:
+Para pruebas locales, inicia exactamente un worker ligado a localhost:
 
 ```bash
 uv run --locked --no-dev --extra native-gpu --env-file .env.native -- uvicorn swimtrack_ai.main:app --host 127.0.0.1 --port 8001 --workers 1
@@ -66,15 +66,15 @@ curl http://127.0.0.1:8001/readyz
 
 Para una primera prueba persistente sin privilegios, ejecuta Uvicorn dentro de `tmux`. En un cluster administrado usa el scheduler disponible, por ejemplo Slurm, en vez de dejar procesos fuera de una asignación.
 
-### Conexión mediante SSH tunnel
+### Conexión privada directa
 
-Desde la máquina donde corre `swimtrack-front`, crea un tunnel cifrado y deja el proceso activo:
+En el despliegue de este proyecto, Uvicorn se liga exclusivamente a la IP privada de la GPU y a un puerto permitido:
 
 ```bash
-ssh -NT -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:18001:127.0.0.1:8001 usuario@gpu-host
+uv run --locked --no-dev --extra native-gpu --env-file .env.native -- uvicorn swimtrack_ai.main:app --host 10.0.218.101 --port 7001 --workers 1
 ```
 
-Configura el front con `VISION_BASE_URL=http://127.0.0.1:18001` y el mismo token. Esta alternativa no requiere abrir el puerto 8001 ni administrar el firewall de la máquina GPU.
+En esta VM temporal, el rango `7000-7099` ya está abierto y `swimtrack-ansible` no modifica UFW. Configura el Front con `VISION_BASE_URL=http://10.0.218.101:7001` y el mismo token. Todas las rutas `/v1/*` exigen el token, pero el acceso de red no se limita por origen; no uses `0.0.0.0` ni reutilices este HTTP directo fuera de la red privada temporal del proyecto.
 
 ## Ejecución alternativa con Docker
 
@@ -103,8 +103,10 @@ X-Swimtrack-Auth: <SWIMTRACK_AUTH_TOKEN>
 POST /v1/tracking-sessions
 Content-Type: application/json
 
-{"fps": 60}
+{"fps": 60, "lap_calibration_id": "fixed-camera-v1"}
 ```
+
+`lap_calibration_id` es opcional. `fixed-camera-v1` habilita el score heurístico de vuelta para el carril central de la cámara fija del proyecto; si se omite, la respuesta conserva el contrato anterior sin `lap_scores`.
 
 Respuesta HTTP 201:
 
@@ -155,11 +157,41 @@ Los frames transportados pueden estar redimensionados a 640×640. `original_widt
       "height": 1080,
       "boxes": [
         {"id":3,"x1":417.2,"y1":201.8,"x2":722.1,"y2":811.0,"conf":0.94,"class_id":0}
+      ],
+      "lap_scores": [
+        {
+          "lane_id": "center",
+          "track_id": 3,
+          "lap_score": 0.82,
+          "no_lap_score": 0.18,
+          "observation_quality": 0.93,
+          "evaluable": true,
+          "longitudinal_position": 0.91,
+          "endpoint": "near",
+          "candidate_time_ms": 810.0,
+          "window_start_ms": 0.0,
+          "window_end_ms": 933.33,
+          "score_version": "trajectory-v1",
+          "evidence": {"wall":0.96,"approach":0.84,"reversal":0.88,"departure":0.79,"track_quality":0.93}
+        }
       ]
     }
   ]
 }
 ```
+
+`lap_score` y `no_lap_score` son scores heurísticos continuos, no probabilidades calibradas ni un conteo definitivo. El score combina cercanía a la pared, aproximación, reversión, salida y calidad de tracking. Si falta suficiente trayectoria, `evaluable` es `false` y `no_lap_score` se omite para no convertir ausencia de observación en evidencia de `no_lap`.
+
+### Calibración fija de carril
+
+La calibración `fixed-camera-v1` proviene de `mpv-shot0001.jpg` (1041×1041) y usa coordenadas normalizadas, por lo que también aplica a los videos originales 1080×1080 mientras no cambien el crop ni la cámara. Sólo el carril central es visible de pared a pared.
+
+```text
+visible_polygon = [(0.4463,0.1583), (0.5815,0.1583), (1.0000,0.6630), (1.0000,0.9769), (0.0000,0.9769), (0.0000,0.6824)]
+source_quad     = [(0.4463,0.1583), (0.5815,0.1583), (1.2603,0.9769), (-0.2507,0.9769)]
+```
+
+`source_quad` extrapola las corcheras hasta la pared cercana, fuera del encuadre, y se transforma mediante homografía a una coordenada longitudinal `s ∈ [0,1]`. Los carriles laterales visibles sólo parcialmente quedan excluidos del score.
 
 `sequence` debe comenzar en 0 y aumentar exactamente de uno en uno. `frame_index` debe ser estrictamente creciente. ByteTrack es stateful y por eso batches de una misma sesión no pueden procesarse en paralelo.
 

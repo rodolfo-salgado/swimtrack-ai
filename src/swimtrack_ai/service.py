@@ -13,6 +13,7 @@ import numpy as np
 from swimtrack_ai.config import Settings
 from swimtrack_ai.detectors import Detector
 from swimtrack_ai.errors import ConflictError, SessionCapacityError, SessionNotFoundError
+from swimtrack_ai.lap_analysis import LapAnalyzer
 from swimtrack_ai.schemas import BatchMetadata, BatchResult, BoundingBox, FrameResult, SessionCreated
 from swimtrack_ai.tracker import Tracker
 
@@ -27,6 +28,7 @@ class CachedBatch:
 class SessionState:
     session_id: str
     tracker: Tracker
+    lap_analyzer: LapAnalyzer | None
     expires_at: float
     next_sequence: int = 0
     last_frame_index: int | None = None
@@ -51,7 +53,7 @@ class TrackingService:
         self._sessions: dict[str, SessionState] = {}
         self._sessions_lock = threading.RLock()
 
-    def create_session(self, fps: float) -> SessionCreated:
+    def create_session(self, fps: float, lap_calibration_id: str | None = None) -> SessionCreated:
         self.expire_sessions()
         with self._sessions_lock:
             if len(self._sessions) >= self.settings.max_sessions:
@@ -60,6 +62,7 @@ class TrackingService:
             self._sessions[session_id] = SessionState(
                 session_id=session_id,
                 tracker=self.tracker_factory(fps),
+                lap_analyzer=LapAnalyzer(fps, lap_calibration_id) if lap_calibration_id is not None else None,
                 expires_at=self.clock() + self.settings.session_ttl_seconds,
             )
         return SessionCreated(
@@ -169,6 +172,16 @@ class TrackingService:
                             width=item.original_width,
                             height=item.original_height,
                             boxes=boxes,
+                            lap_scores=(
+                                state.lap_analyzer.observe(
+                                    time_ms=item.time_ms,
+                                    width=item.original_width,
+                                    height=item.original_height,
+                                    boxes=boxes,
+                                )
+                                if state.lap_analyzer is not None
+                                else None
+                            ),
                         )
                     )
             except Exception as exc:
