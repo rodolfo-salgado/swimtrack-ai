@@ -37,12 +37,12 @@ class Settings:
     input_width: int = 640
     input_height: int = 640
     diagnostic_score_floor: float = 0.05
-    score_threshold: float = 0.35
+    score_threshold: float = 0.15
     person_label: int = 0
     max_detections: int = 20
-    min_box_area: float = 500.0
-    track_threshold: float = 0.45
-    track_buffer: int = 60
+    min_box_area: float = 150.0
+    track_threshold: float = 0.35
+    track_buffer: int = 90
     match_threshold: float = 0.80
     mot20: bool = False
     lane_roi_enabled: bool = True
@@ -58,6 +58,16 @@ class Settings:
     cleanup_interval_seconds: int = 30
     trt_workspace_gb: float = 4.0
     trt_fp16: bool = True
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.diagnostic_score_floor <= self.score_threshold <= 1.0:
+            raise ValueError("diagnostic_score_floor and score_threshold must satisfy 0 <= floor <= threshold <= 1")
+        if self.min_box_area < 0:
+            raise ValueError("min_box_area must not be negative")
+        if not 0.0 <= self.track_threshold <= 1.0:
+            raise ValueError("track_threshold must be between zero and one")
+        if not 0.0 <= self.match_threshold <= 1.0:
+            raise ValueError("match_threshold must be between zero and one")
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -76,12 +86,12 @@ class Settings:
             input_width=_integer("INPUT_WIDTH", 640),
             input_height=_integer("INPUT_HEIGHT", 640),
             diagnostic_score_floor=_floating("DIAGNOSTIC_SCORE_FLOOR", 0.05),
-            score_threshold=_floating("SCORE_THRESHOLD", 0.35),
+            score_threshold=_floating("SCORE_THRESHOLD", 0.15),
             person_label=int(_env("PERSON_LABEL", "0")),
             max_detections=_integer("MAX_DETECTIONS", 20),
-            min_box_area=_floating("MIN_BOX_AREA", 500.0),
-            track_threshold=_floating("TRACK_THRESHOLD", 0.45),
-            track_buffer=_integer("TRACK_BUFFER", 60),
+            min_box_area=_floating("MIN_BOX_AREA", 150.0),
+            track_threshold=_floating("TRACK_THRESHOLD", 0.35),
+            track_buffer=_integer("TRACK_BUFFER", 90),
             match_threshold=_floating("MATCH_THRESHOLD", 0.80),
             mot20=_boolean("MOT20", False),
             lane_roi_enabled=_boolean("LANE_ROI_ENABLED", True),

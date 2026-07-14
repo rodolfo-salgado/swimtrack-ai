@@ -103,10 +103,12 @@ X-Swimtrack-Auth: <SWIMTRACK_AUTH_TOKEN>
 POST /v1/tracking-sessions
 Content-Type: application/json
 
-{"fps": 60, "lap_calibration_id": "fixed-camera-v1"}
+{"fps": 60, "lap_calibration_id": "fixed-camera-v1", "diagnostics": "counts"}
 ```
 
 `lap_calibration_id` es opcional. `fixed-camera-v1` habilita el score heurístico de vuelta para el carril central de la cámara fija del proyecto; si se omite, la respuesta conserva el contrato anterior sin `lap_scores`.
+
+`diagnostics` también es opcional y acepta `none`, `counts` o `boxes`. Los dos últimos añaden instrumentación por frame para `person_candidates`, detecciones aceptadas por score/área, detecciones que sobreviven el ROI de carril, tracks activos y tracks conservados como `lost`; `boxes` debe reservarse para experimentos porque aumenta el payload.
 
 Respuesta HTTP 201:
 
@@ -185,6 +187,8 @@ Los frames transportados pueden estar redimensionados a 640×640. `original_widt
 ### Calibración fija de carril
 
 La calibración `fixed-camera-v1` proviene de `mpv-shot0001.jpg` (1041×1041) y usa coordenadas normalizadas, por lo que también aplica a los videos originales 1080×1080 mientras no cambien el crop ni la cámara. Sólo el carril central es visible de pared a pared.
+
+Con `SWIMTRACK_LANE_ROI_ENABLED=true`, las detecciones se asignan al polígono antes de ByteTrack y cada carril usa una instancia independiente del tracker. Las sesiones sin calibración mantienen el tracker global anterior.
 
 ```text
 visible_polygon = [(0.4463,0.1583), (0.5815,0.1583), (1.0000,0.6630), (1.0000,0.9769), (0.0000,0.9769), (0.0000,0.6824)]

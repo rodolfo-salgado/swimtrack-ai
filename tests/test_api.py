@@ -197,8 +197,8 @@ def test_box_diagnostics_include_candidates_and_effective_configuration(client: 
     assert created.status_code == 201
     configuration = created.json()["tracking_configuration"]
     assert configuration["diagnostic_score_floor"] == 0.05
-    assert configuration["effective_lost_buffer_frames"] == 120
-    assert configuration["effective_lost_buffer_seconds"] == 2.0
+    assert configuration["effective_lost_buffer_frames"] == 180
+    assert configuration["effective_lost_buffer_seconds"] == 3.0
 
     response = submit(client, created.json()["session_id"], metadata("box-diagnostics", 0))
     diagnostics = response.json()["frames"][0]["tracking_diagnostics"]

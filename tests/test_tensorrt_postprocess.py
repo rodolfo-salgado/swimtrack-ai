@@ -3,9 +3,27 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from swimtrack_ai.config import Settings
 from swimtrack_ai.detectors.tensorrt import postprocess_detections
+
+
+def test_tracking_threshold_configuration_is_validated(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="floor <= threshold"):
+        Settings(
+            model_source_dir=tmp_path,
+            model_cache_dir=tmp_path,
+            diagnostic_score_floor=0.4,
+            score_threshold=0.2,
+        )
+
+    with pytest.raises(ValueError, match="match_threshold"):
+        Settings(
+            model_source_dir=tmp_path,
+            model_cache_dir=tmp_path,
+            match_threshold=1.1,
+        )
 
 
 def test_postprocess_exposes_low_score_person_candidates_before_runtime_filters(tmp_path: Path) -> None:
