@@ -166,7 +166,7 @@ def test_fixed_camera_lap_scoring_is_opt_in(client: TestClient) -> None:
     assert score["lane_id"] == "center"
     assert score["lap_score"] == 0.0
     assert score["evaluable"] is False
-    assert score["score_version"] == "trajectory-v4"
+    assert score["score_version"] == "trajectory-v5"
 
 
 def test_lap_analysis_falls_back_to_lane_detections_without_active_tracks() -> None:

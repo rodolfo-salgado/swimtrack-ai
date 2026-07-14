@@ -18,7 +18,7 @@ from swimtrack_ai.calibration import (
 )
 from swimtrack_ai.schemas import BoundingBox, LaneLapScore, LapEvidence
 
-LAP_SCORE_VERSION = "trajectory-v4"
+LAP_SCORE_VERSION = "trajectory-v5"
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +108,9 @@ class LapAnalyzer:
     reference_departure = 0.08
     lane_margin = 0.05
     interior_zone = (0.20, 0.80)
+    raw_continuity_slack = 0.12
+    raw_max_speed_per_second = 0.04
+    raw_max_position_jump = 0.20
 
     def __init__(self, fps: float, calibration_id: str) -> None:
         self.fps = fps
@@ -178,9 +181,9 @@ class LapAnalyzer:
         boxes: list[BoundingBox],
     ) -> _Observation:
         candidates: list[tuple[float, float, BoundingBox]] = []
-        recent_position = next(
+        recent_observation = next(
             (
-                item.position
+                item
                 for item in reversed(runtime.history)
                 if item.position is not None and time_ms - item.time_ms <= self.max_side_gap_ms
             ),
@@ -196,10 +199,21 @@ class LapAnalyzer:
                 -self.lane_margin <= lane_x <= 1.0 + self.lane_margin
                 and -self.lane_margin <= position <= 1.0 + self.lane_margin
             ):
-                center_penalty = abs(float(lane_x) - 0.5) * 0.05
-                continuity_penalty = (
-                    abs(float(position) - recent_position) * 0.25 if recent_position is not None else 0.0
+                continuity_delta = (
+                    abs(float(position) - recent_observation.position)
+                    if recent_observation is not None and recent_observation.position is not None
+                    else 0.0
                 )
+                if box.id <= 0 and recent_observation is not None:
+                    elapsed_seconds = max(0.0, time_ms - recent_observation.time_ms) / 1000.0
+                    allowed_jump = min(
+                        self.raw_max_position_jump,
+                        self.raw_continuity_slack + self.raw_max_speed_per_second * elapsed_seconds,
+                    )
+                    if continuity_delta > allowed_jump:
+                        continue
+                center_penalty = abs(float(lane_x) - 0.5) * 0.05
+                continuity_penalty = continuity_delta * 0.25
                 candidates.append((float(box.conf) - center_penalty - continuity_penalty, float(position), box))
 
         if not candidates:

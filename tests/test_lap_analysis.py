@@ -160,8 +160,10 @@ def test_far_wall_reversal_survives_a_long_underwater_gap() -> None:
     approach = np.linspace(0.42, 0.03, 18).tolist()
     underwater = [None] * 45
     departure = np.linspace(0.04, 0.42, 18).tolist()
+    positions = approach + underwater + departure + [0.42] * 15
+    track_ids = [7] * len(approach) + [7] * len(underwater) + [-1] * (len(departure) + 15)
 
-    results = _run_timeline(approach + underwater + departure + [0.42] * 15)
+    results = _run_timeline(positions, track_ids=track_ids)
     best = max(results, key=lambda result: result.lap_score)
 
     assert best.endpoint == "far"
@@ -169,6 +171,32 @@ def test_far_wall_reversal_survives_a_long_underwater_gap() -> None:
     assert best.lap_score > 0.20
     assert best.candidate_time_ms is not None
     assert best.candidate_time_ms < 2_000
+
+
+def test_raw_fallback_rejects_an_impossible_jump_to_the_wall() -> None:
+    analyzer = LapAnalyzer(fps=10.0, calibration_id=FIXED_CAMERA_CALIBRATION_ID)
+    results = []
+    for index, position in enumerate(np.linspace(0.35, 0.58, 20)):
+        results.append(
+            analyzer.observe(
+                time_ms=index * 100.0,
+                width=1080,
+                height=1080,
+                boxes=[_box_at(float(position), track_id=7)],
+            )[0]
+        )
+    for offset in range(12):
+        results.append(
+            analyzer.observe(
+                time_ms=(20 + offset) * 100.0,
+                width=1080,
+                height=1080,
+                boxes=[_box_at(0.95, track_id=-1, confidence=0.30)],
+            )[0]
+        )
+
+    assert all(result.longitudinal_position is None for result in results[20:])
+    assert max(result.lap_score for result in results) == 0.0
 
 
 def test_gap_longer_than_supported_occlusion_is_not_joined() -> None:
