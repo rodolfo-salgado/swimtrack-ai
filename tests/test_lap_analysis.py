@@ -93,6 +93,7 @@ def test_confirmed_near_wall_reversal_gets_high_lap_score() -> None:
     assert result.no_lap_score == pytest.approx(1.0 - result.lap_score)
     assert result.evidence.wall > 0.80
     assert result.evidence.reversal > 0.80
+    assert result.candidate_episode_id == 1
     assert result.score_version == LAP_SCORE_VERSION
 
 
@@ -104,6 +105,7 @@ def test_near_wall_start_is_not_eligible_without_prior_interior_observation() ->
 
     assert max(result.lap_score for result in results) == 0.0
     assert all(result.candidate_time_ms is None for result in results)
+    assert all(result.candidate_episode_id is None for result in results)
 
 
 def test_finish_at_wall_without_departure_is_not_a_lap() -> None:
@@ -138,6 +140,20 @@ def test_confirmed_far_wall_reversal_gets_high_lap_score() -> None:
     assert result.evaluable
     assert result.endpoint == "far"
     assert result.lap_score > 0.70
+
+
+def test_each_wall_visit_has_one_episode_id_and_rearms_in_the_interior() -> None:
+    first_turn = np.linspace(0.45, 0.98, 16).tolist() + np.linspace(0.98, 0.45, 16)[1:].tolist()
+    second_turn = np.linspace(0.45, 0.97, 16)[1:].tolist() + np.linspace(0.97, 0.50, 16)[1:].tolist()
+
+    results = _run_timeline(first_turn + [0.45] * 12 + second_turn + [0.50] * 15)
+    positive_episode_ids = {
+        result.candidate_episode_id
+        for result in results
+        if result.lap_score > 0.0 and result.candidate_episode_id is not None
+    }
+
+    assert positive_episode_ids == {1, 2}
 
 
 def test_monotonic_middle_trajectory_is_no_lap() -> None:

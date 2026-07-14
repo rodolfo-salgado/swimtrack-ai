@@ -18,7 +18,7 @@ from swimtrack_ai.calibration import (
 )
 from swimtrack_ai.schemas import BoundingBox, LaneLapScore, LapEvidence
 
-LAP_SCORE_VERSION = "trajectory-v2"
+LAP_SCORE_VERSION = "trajectory-v3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +35,17 @@ class _LaneRuntime:
     image_to_lane: np.ndarray
     history: deque[_Observation] = field(default_factory=deque)
     armed_since_ms: float | None = None
+    episodes: deque[_WallEpisode] = field(default_factory=deque)
+    active_episode: _WallEpisode | None = None
+    next_episode_id: int = 1
+
+
+@dataclass(slots=True)
+class _WallEpisode:
+    episode_id: int
+    endpoint: str
+    start_ms: float
+    end_ms: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +53,7 @@ class _CandidateScore:
     score: float
     endpoint: str
     candidate_time_ms: float
+    episode_id: int
     track_id: int | None
     evidence: LapEvidence
 
@@ -120,17 +132,41 @@ class LapAnalyzer:
                 raise ValueError("Lap observations must not move backwards in time")
             observation = self._select_observation(runtime, time_ms, width, height, boxes)
             runtime.history.append(observation)
-            if (
-                runtime.armed_since_ms is None
-                and observation.position is not None
-                and self.interior_zone[0] <= observation.position <= self.interior_zone[1]
-            ):
-                runtime.armed_since_ms = time_ms
+            self._update_wall_episode(runtime, observation)
             cutoff = time_ms - self.history_ms
             while runtime.history and runtime.history[0].time_ms < cutoff:
                 runtime.history.popleft()
+            while runtime.episodes and runtime.episodes[0].end_ms is not None and runtime.episodes[0].end_ms < cutoff:
+                runtime.episodes.popleft()
             results.append(self._score(runtime, observation))
         return results
+
+    def _update_wall_episode(self, runtime: _LaneRuntime, observation: _Observation) -> None:
+        if observation.position is None:
+            return
+        position = observation.position
+        if self.interior_zone[0] <= position <= self.interior_zone[1]:
+            if runtime.armed_since_ms is None:
+                runtime.armed_since_ms = observation.time_ms
+            if runtime.active_episode is not None:
+                runtime.active_episode.end_ms = observation.time_ms
+                runtime.active_episode = None
+            return
+        endpoint = "far" if position <= self.endpoint_zone else "near" if position >= 1.0 - self.endpoint_zone else None
+        if endpoint is None or runtime.armed_since_ms is None or observation.time_ms <= runtime.armed_since_ms:
+            return
+        if runtime.active_episode is not None and runtime.active_episode.endpoint == endpoint:
+            return
+        if runtime.active_episode is not None:
+            runtime.active_episode.end_ms = observation.time_ms
+        episode = _WallEpisode(
+            episode_id=runtime.next_episode_id,
+            endpoint=endpoint,
+            start_ms=observation.time_ms,
+        )
+        runtime.next_episode_id += 1
+        runtime.episodes.append(episode)
+        runtime.active_episode = episode
 
     def _select_observation(
         self,
@@ -177,7 +213,7 @@ class LapAnalyzer:
             history,
             history[0].time_ms,
             history[-1].time_ms,
-            runtime.armed_since_ms,
+            list(runtime.episodes),
         )
         lap_score = best.score if best is not None and evaluable else 0.0
         no_lap_score = 1.0 - lap_score if evaluable else None
@@ -199,6 +235,7 @@ class LapAnalyzer:
             longitudinal_position=current.position,
             endpoint=best.endpoint if best is not None else None,
             candidate_time_ms=best.candidate_time_ms if best is not None else None,
+            candidate_episode_id=best.episode_id if best is not None else None,
             window_start_ms=history[0].time_ms,
             window_end_ms=history[-1].time_ms,
             score_version=LAP_SCORE_VERSION,
@@ -210,16 +247,15 @@ class LapAnalyzer:
         history: list[_Observation],
         window_start_ms: float,
         window_end_ms: float,
-        armed_since_ms: float | None,
+        episodes: list[_WallEpisode],
     ) -> _CandidateScore | None:
-        if armed_since_ms is None:
+        if not episodes:
             return None
         valid = [item for item in history if item.position is not None]
         best: _CandidateScore | None = None
         for candidate in valid:
             if (
-                candidate.time_ms <= armed_since_ms
-                or candidate.time_ms < window_start_ms + self.context_before_ms
+                candidate.time_ms < window_start_ms + self.context_before_ms
                 or candidate.time_ms > window_end_ms - self.context_after_ms
             ):
                 continue
@@ -228,10 +264,26 @@ class LapAnalyzer:
             for endpoint, wall_distance in endpoint_distances.items():
                 if wall_distance > self.endpoint_zone:
                     continue
-                scored = self._score_candidate(history, candidate, endpoint, wall_distance)
+                episode = self._episode_for_candidate(episodes, endpoint, candidate.time_ms)
+                if episode is None:
+                    continue
+                scored = self._score_candidate(history, candidate, endpoint, wall_distance, episode.episode_id)
                 if scored is not None and (best is None or scored.score > best.score):
                     best = scored
         return best
+
+    @staticmethod
+    def _episode_for_candidate(
+        episodes: list[_WallEpisode],
+        endpoint: str,
+        candidate_time_ms: float,
+    ) -> _WallEpisode | None:
+        for episode in reversed(episodes):
+            if episode.endpoint != endpoint or candidate_time_ms < episode.start_ms:
+                continue
+            if episode.end_ms is None or candidate_time_ms <= episode.end_ms:
+                return episode
+        return None
 
     def _score_candidate(
         self,
@@ -239,6 +291,7 @@ class LapAnalyzer:
         candidate: _Observation,
         endpoint: str,
         wall_distance: float,
+        episode_id: int,
     ) -> _CandidateScore | None:
         before = [
             item
@@ -285,6 +338,7 @@ class LapAnalyzer:
             score=_clip01(evidence_score * quality),
             endpoint=endpoint,
             candidate_time_ms=candidate.time_ms,
+            episode_id=episode_id,
             track_id=candidate.track_id,
             evidence=evidence,
         )

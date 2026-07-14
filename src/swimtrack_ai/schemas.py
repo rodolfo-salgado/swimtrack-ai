@@ -119,6 +119,7 @@ class LaneLapScore(BaseModel):
     longitudinal_position: float | None = Field(default=None, ge=0, le=1)
     endpoint: Literal["far", "near"] | None = None
     candidate_time_ms: float | None = Field(default=None, ge=0)
+    candidate_episode_id: int | None = Field(default=None, ge=1)
     window_start_ms: float = Field(ge=0)
     window_end_ms: float = Field(ge=0)
     score_version: str
