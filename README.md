@@ -1,6 +1,6 @@
 # SwimTrack AI
 
-Servicio privado de inferencia RT-DETRv2 + ByteTrack para batches de frames. La API recibe varios frames por request, pero la versión actual ejecuta TensorRT con batch interno fijo de 1 y actualiza ByteTrack secuencialmente. Esto mantiene el contrato HTTP preparado para optimizar el detector a un batch GPU dinámico sin cambiar el front.
+Servicio privado de inferencia RT-DETRv2 + ByteTrack para batches de frames. La API decodifica JPEG en paralelo con un límite global, agrupa las vistas full/crop en TensorRT y actualiza ByteTrack secuencialmente. El engine usa un profile B1/óptimo B4/máximo B8 cuando el ONNX declara dinámica la dimensión 0 de `images`, `orig_target_sizes`, `labels`, `boxes` y `scores`; con un artefacto antiguo de outputs B1 el servicio se limita de forma segura a B1.
 
 ## Arquitectura
 
@@ -9,7 +9,7 @@ swimtrack-front (BFF)
   -> crea una tracking session
   -> POST multipart de frames ordenados
 swimtrack-ai (una réplica, una GPU)
-  -> RT-DETRv2(frame 0), ..., RT-DETRv2(frame N)
+  -> decode JPEG limitado + RT-DETRv2(batch de vistas full/crop)
   -> ByteTrack(frame 0), ..., ByteTrack(frame N)
   -> bboxes en coordenadas del video original
 ```
@@ -19,9 +19,10 @@ El servicio mantiene estado en memoria. Debe ejecutarse con un solo worker y una
 ## Requisitos del host GPU
 
 - Linux x86_64 con glibc 2.28 o posterior, NVIDIA driver R580 y acceso funcional a la GPU mediante `nvidia-smi`.
+- FFmpeg y FFprobe instalados en el host; `ffmpeg -hwaccels` debe incluir `cuda` para la ruta de video comprimido.
 - `uv` con capacidad de instalar Python 3.12 y descargar paquetes desde PyPI.
 - Los submodules `vendor/ByteTrack` y `vendor/RT-DETRv2` inicializados.
-- El ONNX `rtdetrv2_s.onnx` y su archivo `rtdetrv2_s.onnx.data` disponibles en el filesystem.
+- El ONNX dinámico `artifacts/models/rtdetrv2_s.onnx` disponible en el filesystem.
 - Al menos 8 GiB libres y escribibles para `.venv`, los wheels CUDA/TensorRT y el engine cacheado; la instalación comprobada ocupa aproximadamente 3.5 GiB antes del cache y algunas configuraciones pueden conservar otra copia de los wheels.
 
 El engine TensorRT no se distribuye. Se construye desde el ONNX la primera vez y se guarda en el directorio configurado por `SWIMTRACK_MODEL_CACHE_DIR`. Un manifest incluye el hash del ONNX y su external data, versión de TensorRT, device y opciones de build; cualquier cambio invalida el cache. Si el engine compatible por manifest no puede deserializarse, el servicio lo reconstruye una vez.
@@ -42,7 +43,17 @@ uv python install 3.12
 uv sync --locked --no-dev --extra native-gpu
 ```
 
-Las rutas de `.env.native.example` son relativas a `swimtrack-ai/` y funcionan con la estructura de directorios recomendada. Edita `SWIMTRACK_AUTH_TOKEN` y usa rutas absolutas si los repositorios no son hermanos.
+Las rutas de `.env.native.example` son relativas a `swimtrack-ai/`. Edita `SWIMTRACK_AUTH_TOKEN` y usa rutas absolutas si almacenas el artifact fuera del repositorio.
+
+### Artifact del modelo
+
+El modelo no depende de otro repositorio. Genera el ONNX con batch dinámico desde el checkout actual y valida el checksum del checkpoint:
+
+```bash
+uv run --script scripts/export_rtdetrv2_onnx.py
+```
+
+El script usa `vendor/RT-DETRv2`, descarga el checkpoint oficial sólo si todavía no existe en `artifacts/checkpoints/`, y escribe `artifacts/models/rtdetrv2_s.onnx`. El ONNX usa data embebida; un `.onnx.data` sólo se acepta por compatibilidad con artifacts externos heredados.
 
 Comprueba TensorRT y la visibilidad CUDA antes de iniciar la API:
 
@@ -186,6 +197,19 @@ Los frames transportados pueden estar redimensionados a 640×640. `original_widt
 `lap_score` y `no_lap_score` son scores heurísticos continuos, no probabilidades calibradas ni un conteo definitivo. El score combina cercanía a la pared, aproximación, reversión, salida y calidad local de tracking. `trajectory-v4` sólo habilita candidatos después de observar al nadador dentro de la zona interior del carril; así una salida que comienza junto a la pared no se confunde con una vuelta. Cuando ByteTrack no mantiene un track, el análisis usa las detecciones de la ROI del carril y puede unir ambos lados de una oclusión de hasta 6 segundos, reduciendo la confianza según la duración del gap. `candidate_episode_id` identifica una visita completa a la pared y agrupa todos sus candidatos, mientras que `candidate_time_ms` conserva el instante estimado de contacto. Si falta suficiente trayectoria, `evaluable` es `false` y `no_lap_score` se omite para no convertir ausencia de observación en evidencia de `no_lap`.
 
 Las respuestas `200` incluyen los headers `X-Swimtrack-Decode-Ms`, `X-Swimtrack-Process-Ms` y `X-Swimtrack-Total-Ms`. Miden, respectivamente, la lectura/decodificación multipart, el procesamiento serializado de la sesión (inference y tracking) y el total de la ruta; el Front los registra por batch sin alterar el JSON del contrato.
+
+### Procesar un video comprimido con NVDEC
+
+```http
+POST /v1/tracking-sessions/{session_id}/video
+Content-Type: multipart/form-data
+```
+
+El multipart contiene el campo `video` con el archivo original y `sample_fps` con la frecuencia de muestreo deseada. La respuesta es `application/x-ndjson`: cada línea es un objeto `FrameResult`, en orden temporal, con el `time_ms` de presentación real del video y las dimensiones originales. El Front debe consumir cada línea conforme llega; no hay un wrapper `BatchResult` en esta ruta.
+
+FFprobe valida el stream antes de iniciar la respuesta y FFmpeg se ejecuta con `-hwaccel cuda -hwaccel_device 0 -hwaccel_output_format cuda`. El filtro selecciona usando presentation timestamps antes de `hwdownload`, por lo que sólo los frames muestreados cruzan de la GPU al proceso de inference. No existe fallback silencioso a CPU: si CUDA/NVDEC no puede decodificar, la API retorna `503` con `error.code="nvdec_decode_failed"` antes de empezar el stream cuando es posible. Una falla después de emitir líneas termina el stream y queda registrada en el servidor.
+
+Las respuestas exitosas incluyen `X-Swimtrack-Decode-Path: nvdec` y `X-Swimtrack-Decode-Backend: ffmpeg`; esos headers sólo se envían después de decodificar el primer batch mediante la ruta CUDA. `SWIMTRACK_MAX_VIDEO_BYTES`, `SWIMTRACK_VIDEO_DECODE_BATCH_FRAMES`, `SWIMTRACK_FFMPEG_PATH`, `SWIMTRACK_FFPROBE_PATH` y `SWIMTRACK_VIDEO_PROBE_TIMEOUT_SECONDS` controlan límites y herramientas de esta ruta.
 
 ### Calibración fija de carril
 

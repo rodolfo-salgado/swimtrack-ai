@@ -58,12 +58,21 @@ class Settings:
     max_request_bytes: int = 16_000_000
     max_decoded_pixels: int = 4_194_304
     max_metadata_bytes: int = 65_536
+    max_video_bytes: int = 1_073_741_824
+    video_decode_batch_frames: int = 4
+    ffmpeg_path: str = "ffmpeg"
+    ffprobe_path: str = "ffprobe"
+    video_probe_timeout_seconds: int = 30
     max_sessions: int = 128
     session_ttl_seconds: int = 900
     idempotency_cache_size: int = 32
     cleanup_interval_seconds: int = 30
+    decode_workers: int = 4
+    preprocess_workers: int = 4
     trt_workspace_gb: float = 4.0
     trt_fp16: bool = True
+    trt_opt_batch_size: int = 4
+    trt_max_batch_size: int = 8
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.diagnostic_score_floor <= self.score_threshold <= 1.0:
@@ -81,6 +90,12 @@ class Settings:
             raise ValueError("far crop coordinates must define a non-empty normalized rectangle")
         if not 0.0 <= self.far_crop_nms_threshold <= 1.0:
             raise ValueError("far_crop_nms_threshold must be between zero and one")
+        if self.trt_opt_batch_size > self.trt_max_batch_size:
+            raise ValueError("trt_opt_batch_size must not exceed trt_max_batch_size")
+        if self.video_decode_batch_frames > self.trt_max_batch_size:
+            raise ValueError("video_decode_batch_frames must not exceed trt_max_batch_size")
+        if not self.ffmpeg_path.strip() or not self.ffprobe_path.strip():
+            raise ValueError("ffmpeg_path and ffprobe_path must not be empty")
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -120,12 +135,21 @@ class Settings:
             max_request_bytes=_integer("MAX_REQUEST_BYTES", 16_000_000),
             max_decoded_pixels=_integer("MAX_DECODED_PIXELS", 4_194_304),
             max_metadata_bytes=_integer("MAX_METADATA_BYTES", 65_536),
+            max_video_bytes=_integer("MAX_VIDEO_BYTES", 1_073_741_824),
+            video_decode_batch_frames=_integer("VIDEO_DECODE_BATCH_FRAMES", 4),
+            ffmpeg_path=_env("FFMPEG_PATH", "ffmpeg"),
+            ffprobe_path=_env("FFPROBE_PATH", "ffprobe"),
+            video_probe_timeout_seconds=_integer("VIDEO_PROBE_TIMEOUT_SECONDS", 30),
             max_sessions=_integer("MAX_SESSIONS", 128),
             session_ttl_seconds=_integer("SESSION_TTL_SECONDS", 900),
             idempotency_cache_size=_integer("IDEMPOTENCY_CACHE_SIZE", 32),
             cleanup_interval_seconds=_integer("CLEANUP_INTERVAL_SECONDS", 30),
+            decode_workers=_integer("DECODE_WORKERS", 4),
+            preprocess_workers=_integer("PREPROCESS_WORKERS", 4),
             trt_workspace_gb=_floating("TRT_WORKSPACE_GB", 4.0),
             trt_fp16=_boolean("TRT_FP16", True),
+            trt_opt_batch_size=_integer("TRT_OPT_BATCH_SIZE", 4),
+            trt_max_batch_size=_integer("TRT_MAX_BATCH_SIZE", 8),
         )
 
     @property

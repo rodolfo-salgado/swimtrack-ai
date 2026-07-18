@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from types import SimpleNamespace
 
 from swimtrack_ai.config import Settings
@@ -25,5 +26,6 @@ def test_engine_manifest_invalidates_when_external_model_data_changes(tmp_path, 
     settings.engine_manifest_path.write_text(json.dumps(engine_signature(settings)), encoding="utf-8")
 
     assert engine_cache_is_current(settings)
+    assert not engine_cache_is_current(replace(settings, trt_max_batch_size=4))
     external_data.write_bytes(b"weights-v2")
     assert not engine_cache_is_current(settings)

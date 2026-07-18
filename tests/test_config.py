@@ -37,3 +37,27 @@ def test_far_crop_configuration_is_validated() -> None:
     ):
         with pytest.raises(ValueError):
             Settings(**values)
+
+
+def test_tensorrt_batch_configuration_is_validated() -> None:
+    with pytest.raises(ValueError, match="trt_opt_batch_size"):
+        Settings(trt_opt_batch_size=8, trt_max_batch_size=4)
+
+
+def test_video_decode_configuration_is_validated_and_loaded_from_environment(monkeypatch) -> None:
+    with pytest.raises(ValueError, match="video_decode_batch_frames"):
+        Settings(video_decode_batch_frames=9, trt_max_batch_size=8)
+
+    monkeypatch.setenv("SWIMTRACK_MAX_VIDEO_BYTES", "123456")
+    monkeypatch.setenv("SWIMTRACK_VIDEO_DECODE_BATCH_FRAMES", "8")
+    monkeypatch.setenv("SWIMTRACK_FFMPEG_PATH", "/opt/ffmpeg")
+    monkeypatch.setenv("SWIMTRACK_FFPROBE_PATH", "/opt/ffprobe")
+    monkeypatch.setenv("SWIMTRACK_VIDEO_PROBE_TIMEOUT_SECONDS", "45")
+
+    settings = Settings.from_env()
+
+    assert settings.max_video_bytes == 123456
+    assert settings.video_decode_batch_frames == 8
+    assert settings.ffmpeg_path == "/opt/ffmpeg"
+    assert settings.ffprobe_path == "/opt/ffprobe"
+    assert settings.video_probe_timeout_seconds == 45

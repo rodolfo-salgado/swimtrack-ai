@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import cv2
 import numpy as np
 
@@ -34,6 +36,15 @@ class FakeDetector:
         detections.sort(key=lambda item: item[0])
         accepted = np.asarray(detections, dtype=np.float32).reshape(-1, 5)
         return DetectorResult(person_candidates=accepted.copy(), accepted=accepted)
+
+    def infer_batch(
+        self,
+        frames: Sequence[np.ndarray],
+        target_sizes: Sequence[tuple[int, int]],
+    ) -> list[DetectorResult]:
+        if len(frames) != len(target_sizes):
+            raise ValueError("frames and target_sizes must have the same length")
+        return [self.infer(frame, target_size) for frame, target_size in zip(frames, target_sizes)]
 
     def close(self) -> None:
         return None

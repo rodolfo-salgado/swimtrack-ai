@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import anyio
 import cv2
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+import swimtrack_ai.api as api_module
 from swimtrack_ai.api import create_app
 from swimtrack_ai.config import Settings
 from swimtrack_ai.detectors import DetectorResult
@@ -435,6 +439,158 @@ def test_multiple_frames_are_returned_in_order(client: TestClient) -> None:
     )
     assert response.status_code == 200, response.text
     assert [frame["frame_index"] for frame in response.json()["frames"]] == [0, 1, 2]
+
+
+def test_parallel_decode_is_bounded_and_preserves_frame_order(monkeypatch) -> None:
+    active = 0
+    maximum_active = 0
+    lock = threading.Lock()
+
+    def recording_decode(payload: bytes) -> np.ndarray:
+        return np.full((1, 1, 3), int(payload.decode("ascii")), dtype=np.uint8)
+
+    async def recording_run_sync(function, payload: bytes, *, limiter):
+        nonlocal active, maximum_active
+        async with limiter:
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            await asyncio.sleep(0.02)
+            with lock:
+                active -= 1
+            return function(payload)
+
+    monkeypatch.setattr(api_module, "_decode_image", recording_decode)
+    monkeypatch.setattr(api_module.anyio.to_thread, "run_sync", recording_run_sync)
+
+    decoded = asyncio.run(
+        api_module._decode_images(
+            [b"0", b"1", b"2", b"3"],
+            limiter=anyio.CapacityLimiter(2),
+        )
+    )
+
+    assert maximum_active == 2
+    assert [int(frame[0, 0, 0]) for frame in decoded if frame is not None] == [0, 1, 2, 3]
+
+
+def test_batch_capable_detector_receives_all_frames_once_and_in_order(settings: Settings) -> None:
+    class BatchDetector:
+        def __init__(self) -> None:
+            self.calls: list[list[tuple[tuple[int, ...], tuple[int, int]]]] = []
+
+        def infer(self, _frame: np.ndarray, _target_size: tuple[int, int]) -> DetectorResult:
+            raise AssertionError("TrackingService should use infer_batch when it is available")
+
+        def infer_batch(
+            self,
+            frames: list[np.ndarray],
+            target_sizes: list[tuple[int, int]],
+        ) -> list[DetectorResult]:
+            self.calls.append([(frame.shape, target_size) for frame, target_size in zip(frames, target_sizes)])
+            empty = np.empty((0, 5), dtype=np.float32)
+            return [DetectorResult(person_candidates=empty, accepted=empty.copy()) for _ in frames]
+
+        def close(self) -> None:
+            return None
+
+    detector = BatchDetector()
+    app = create_app(
+        settings=settings,
+        detector_factory=lambda _settings: detector,
+        tracker_factory_builder=StubTrackerFactory,
+    )
+    metadata_json = json.dumps(
+        {
+            "batch_id": "batched-views",
+            "sequence": 0,
+            "frames": [
+                {
+                    "frame_index": index,
+                    "time_ms": index * 16.667,
+                    "original_width": 128,
+                    "original_height": 96,
+                }
+                for index in range(3)
+            ],
+        }
+    )
+    with TestClient(app) as test_client:
+        session_id = create_session(test_client)
+        response = test_client.post(
+            f"/v1/tracking-sessions/{session_id}/batches",
+            headers={"X-Swimtrack-Auth": "test-secret"},
+            data={"metadata": metadata_json},
+            files=[("frames", (f"frame-{index}.jpg", encoded_frame(index), "image/jpeg")) for index in range(3)],
+        )
+
+    assert response.status_code == 200, response.text
+    assert [frame["frame_index"] for frame in response.json()["frames"]] == [0, 1, 2]
+    assert detector.calls == [[((64, 64, 3), (128, 96))] * 3]
+
+
+def test_far_crop_views_are_packed_into_one_detector_batch(settings: Settings) -> None:
+    crop_settings = replace(settings, far_crop_enabled=True)
+
+    class BatchDetector:
+        def __init__(self) -> None:
+            self.calls: list[list[tuple[tuple[int, ...], tuple[int, int]]]] = []
+
+        def infer_batch(
+            self,
+            frames: list[np.ndarray],
+            target_sizes: list[tuple[int, int]],
+        ) -> list[DetectorResult]:
+            self.calls.append([(frame.shape, target_size) for frame, target_size in zip(frames, target_sizes)])
+            empty = np.empty((0, 5), dtype=np.float32)
+            return [DetectorResult(person_candidates=empty, accepted=empty.copy()) for _ in frames]
+
+        def close(self) -> None:
+            return None
+
+    detector = BatchDetector()
+    app = create_app(
+        settings=crop_settings,
+        detector_factory=lambda _settings: detector,
+        tracker_factory_builder=StubTrackerFactory,
+    )
+    metadata_json = json.dumps(
+        {
+            "batch_id": "batched-crops",
+            "sequence": 0,
+            "frames": [
+                {
+                    "frame_index": index,
+                    "time_ms": index * 16.667,
+                    "original_width": 128,
+                    "original_height": 96,
+                }
+                for index in range(2)
+            ],
+        }
+    )
+    with TestClient(app) as test_client:
+        created = test_client.post(
+            "/v1/tracking-sessions",
+            headers={"X-Swimtrack-Auth": "test-secret"},
+            json={"fps": 60, "lap_calibration_id": "fixed-camera-v1"},
+        )
+        response = test_client.post(
+            f"/v1/tracking-sessions/{created.json()['session_id']}/batches",
+            headers={"X-Swimtrack-Auth": "test-secret"},
+            data={"metadata": metadata_json},
+            files=[("frames", (f"frame-{index}.jpg", encoded_frame(index), "image/jpeg")) for index in range(2)],
+        )
+
+    assert response.status_code == 200, response.text
+    assert detector.calls == [
+        [
+            ((64, 64, 3), (128, 96)),
+            ((64, 64, 3), (128, 96)),
+            ((27, 28, 3), (56, 41)),
+            ((27, 28, 3), (56, 41)),
+        ]
+    ]
 
 
 def test_reused_batch_id_and_wrong_sequence_conflict(client: TestClient) -> None:

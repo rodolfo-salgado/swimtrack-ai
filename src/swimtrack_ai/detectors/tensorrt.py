@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +14,8 @@ import numpy as np
 
 from swimtrack_ai.config import Settings
 from swimtrack_ai.detectors.base import DetectorResult
+
+logger = logging.getLogger(__name__)
 
 
 class EngineLoadError(RuntimeError):
@@ -70,7 +75,7 @@ def engine_signature(settings: Settings) -> dict[str, Any]:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(chunk)
     return {
-        "schema": 1,
+        "schema": 2,
         "model_sha256": digest.hexdigest(),
         "model_files": [path.name for path in model_files],
         "tensorrt_version": trt.__version__,
@@ -79,6 +84,8 @@ def engine_signature(settings: Settings) -> dict[str, Any]:
         "input_height": settings.input_height,
         "fp16": settings.trt_fp16,
         "workspace_gb": settings.trt_workspace_gb,
+        "trt_opt_batch_size": settings.trt_opt_batch_size,
+        "trt_max_batch_size": settings.trt_max_batch_size,
     }
 
 
@@ -97,17 +104,40 @@ def invalidate_engine_cache(settings: Settings) -> None:
     settings.engine_manifest_path.unlink(missing_ok=True)
 
 
+def _network_supports_dynamic_batch(network: Any) -> bool:
+    """Return whether every runtime tensor has an explicitly dynamic batch axis.
+
+    The existing ONNX artifact declared dynamic axes only for its inputs. TensorRT can
+    parse that model, but its fixed-B1 outputs cannot safely receive more than one
+    frame. Inspecting parser tensor shapes before building lets old artifacts retain
+    the previous B1 behavior instead of producing an invalid dynamic profile.
+    """
+
+    tensors = [network.get_input(index) for index in range(network.num_inputs)]
+    tensors.extend(network.get_output(index) for index in range(network.num_outputs))
+    return bool(tensors) and all(
+        len(tensor.shape) > 0 and int(tensor.shape[0]) == -1
+        for tensor in tensors
+    )
+
+
+def _profile_batch_size(settings: Settings, *, dynamic_batch: bool) -> tuple[int, int, int]:
+    if not dynamic_batch:
+        return (1, 1, 1)
+    return (1, settings.trt_opt_batch_size, settings.trt_max_batch_size)
+
+
 def build_engine(settings: Settings) -> None:
     import tensorrt as trt
 
     if not settings.onnx_path.is_file():
         raise FileNotFoundError(f"ONNX model not found: {settings.onnx_path}")
     settings.model_cache_dir.mkdir(parents=True, exist_ok=True)
-    logger = trt.Logger(trt.Logger.INFO)
-    trt.init_libnvinfer_plugins(logger, "")
-    builder = trt.Builder(logger)
+    trt_logger = trt.Logger(trt.Logger.INFO)
+    trt.init_libnvinfer_plugins(trt_logger, "")
+    builder = trt.Builder(trt_logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
-    parser = trt.OnnxParser(network, logger)
+    parser = trt.OnnxParser(network, trt_logger)
     parsed = parser.parse_from_file(str(settings.onnx_path))
     if not parsed:
         errors = [parser.get_error(index).desc() for index in range(parser.num_errors)]
@@ -117,12 +147,40 @@ def build_engine(settings: Settings) -> None:
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(settings.trt_workspace_gb * 1024**3))
     if settings.trt_fp16:
         config.set_flag(trt.BuilderFlag.FP16)
+    dynamic_batch = _network_supports_dynamic_batch(network)
+    min_batch, opt_batch, max_batch = _profile_batch_size(settings, dynamic_batch=dynamic_batch)
+    if not dynamic_batch:
+        logger.warning(
+            "ONNX outputs do not expose a dynamic batch dimension; building a safe B1 TensorRT engine. "
+            "Regenerate the model with dynamic axes for labels, boxes, and scores to enable batching."
+        )
     profile = builder.create_optimization_profile()
-    image_shape = (1, 3, settings.input_height, settings.input_width)
-    profile.set_shape("images", image_shape, image_shape, image_shape)
-    target_shape = (1, 2)
-    profile.set_shape("orig_target_sizes", target_shape, target_shape, target_shape)
-    config.add_optimization_profile(profile)
+    image_shapes = (
+        (min_batch, 3, settings.input_height, settings.input_width),
+        (opt_batch, 3, settings.input_height, settings.input_width),
+        (max_batch, 3, settings.input_height, settings.input_width),
+    )
+    target_shapes = (
+        (min_batch, 2),
+        (opt_batch, 2),
+        (max_batch, 2),
+    )
+    try:
+        profile.set_shape("images", *image_shapes)
+        profile.set_shape("orig_target_sizes", *target_shapes)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"TensorRT rejected the dynamic batch profile: images={image_shapes}, "
+            f"orig_target_sizes={target_shapes}"
+        ) from exc
+    if not profile:
+        raise RuntimeError(
+            f"TensorRT rejected the dynamic batch profile: images={image_shapes}, "
+            f"orig_target_sizes={target_shapes}"
+        )
+    profile_index = config.add_optimization_profile(profile)
+    if profile_index is not None and profile_index < 0:
+        raise RuntimeError("TensorRT rejected the optimization profile")
 
     serialized = builder.build_serialized_network(network, config)
     if serialized is None:
@@ -137,7 +195,7 @@ def build_engine(settings: Settings) -> None:
 
 
 class TensorRTDetector:
-    """RT-DETRv2 TensorRT runner with persistent device buffers and batch size one."""
+    """RT-DETRv2 TensorRT runner with persistent buffers and ordered dynamic batches."""
 
     def __init__(self, settings: Settings) -> None:
         import tensorrt as trt
@@ -152,9 +210,9 @@ class TensorRTDetector:
         self.cuda_device_index = self._parse_device(settings.device)
         self._cuda(cudart.cudaSetDevice(self.cuda_device_index), "select CUDA device")
 
-        logger = trt.Logger(trt.Logger.INFO)
-        trt.init_libnvinfer_plugins(logger, "")
-        with trt.Runtime(logger) as runtime:
+        trt_logger = trt.Logger(trt.Logger.INFO)
+        trt.init_libnvinfer_plugins(trt_logger, "")
+        with trt.Runtime(trt_logger) as runtime:
             self.engine = runtime.deserialize_cuda_engine(settings.engine_path.read_bytes())
         if self.engine is None:
             raise EngineLoadError(f"Could not deserialize TensorRT engine {settings.engine_path}")
@@ -165,6 +223,19 @@ class TensorRTDetector:
         self.names = [self.engine.get_tensor_name(index) for index in range(self.engine.num_io_tensors)]
         self.inputs = [name for name in self.names if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT]
         self.outputs = [name for name in self.names if self.engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT]
+        self._batch_capacity = self._engine_batch_capacity()
+        self._preprocess_executor = ThreadPoolExecutor(
+            max_workers=settings.preprocess_workers,
+            thread_name_prefix="swimtrack-trt-preprocess",
+        )
+        if self._batch_capacity == 1 and settings.trt_max_batch_size > 1:
+            logger.warning(
+                "TensorRT engine does not support a dynamic output batch axis; limiting inference to B1. "
+                "Regenerate the ONNX model and restart to enable B%d.",
+                settings.trt_max_batch_size,
+            )
+        else:
+            logger.info("TensorRT detector batch capacity: %d", self._batch_capacity)
 
     @staticmethod
     def _parse_device(device: str) -> int:
@@ -190,18 +261,75 @@ class TensorRTDetector:
         self._buffers[name] = (pointer, size)
         return pointer
 
-    def _preprocess(self, frame: np.ndarray, target_size: tuple[int, int]) -> dict[str, np.ndarray]:
+    def _engine_batch_capacity(self) -> int:
+        """Return the largest safe runtime batch accepted by this serialized engine."""
+
+        tensors = [*self.inputs, *self.outputs]
+        if not tensors:
+            raise EngineLoadError("TensorRT engine has no input/output tensors")
+        static_tensors = [
+            name
+            for name in tensors
+            if not (shape := tuple(int(value) for value in self.engine.get_tensor_shape(name)))
+            or shape[0] != -1
+        ]
+        if static_tensors:
+            logger.warning("TensorRT tensors with a static batch dimension: %s", ", ".join(static_tensors))
+            return 1
+        try:
+            profile_maximums = [
+                int(tuple(self.engine.get_tensor_profile_shape(name, 0)[2])[0])
+                for name in self.inputs
+            ]
+        except (AttributeError, IndexError, TypeError, ValueError) as exc:
+            logger.warning("Could not inspect the TensorRT dynamic-batch profile; limiting to B1: %s", exc)
+            return 1
+        if not profile_maximums or min(profile_maximums) < 1:
+            logger.warning("TensorRT engine has no valid dynamic-batch profile; limiting to B1")
+            return 1
+        return min(self.settings.trt_max_batch_size, *profile_maximums)
+
+    @property
+    def batch_capacity(self) -> int:
+        """Maximum number of views submitted in one TensorRT execution."""
+
+        return self._batch_capacity
+
+    def _preprocess_frame(self, frame: np.ndarray) -> np.ndarray:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         resized = cv2.resize(
             rgb,
             (self.settings.input_width, self.settings.input_height),
             interpolation=cv2.INTER_LINEAR,
         )
-        image = np.transpose(resized, (2, 0, 1)).astype(np.float32, copy=False) / np.float32(255.0)
-        target_width, target_height = target_size
+        return np.transpose(resized, (2, 0, 1)).astype(np.float32, copy=False) / np.float32(255.0)
+
+    def _preprocess_batch(
+        self,
+        frames: Sequence[np.ndarray],
+        target_sizes: Sequence[tuple[int, int]],
+    ) -> dict[str, np.ndarray]:
+        if len(frames) != len(target_sizes):
+            raise ValueError("frames and target_sizes must have the same length")
+        if len(frames) == 0:
+            raise ValueError("TensorRT inference batch cannot be empty")
+        if len(frames) == 1 or self.settings.preprocess_workers == 1:
+            preprocessed = [self._preprocess_frame(frames[0])] if len(frames) == 1 else [
+                self._preprocess_frame(frame) for frame in frames
+            ]
+        else:
+            preprocessed = list(self._preprocess_executor.map(self._preprocess_frame, frames))
+        images = np.empty(
+            (len(preprocessed), 3, self.settings.input_height, self.settings.input_width),
+            dtype=np.float32,
+        )
+        original_target_sizes = np.empty((len(preprocessed), 2), dtype=np.int64)
+        for index, (image, target_size) in enumerate(zip(preprocessed, target_sizes)):
+            images[index] = image
+            original_target_sizes[index] = target_size
         return {
-            "images": np.ascontiguousarray(image[None, ...]),
-            "orig_target_sizes": np.asarray([[target_width, target_height]], dtype=np.int64),
+            "images": images,
+            "orig_target_sizes": original_target_sizes,
         }
 
     def _output_arrays(self) -> dict[str, np.ndarray]:
@@ -245,25 +373,61 @@ class TensorRTDetector:
             )
         self._cuda(self.cudart.cudaStreamSynchronize(self.stream), "synchronize CUDA stream")
 
-    def infer(self, frame: np.ndarray, target_size: tuple[int, int]) -> DetectorResult:
+    def _infer_chunk(
+        self,
+        frames: Sequence[np.ndarray],
+        target_sizes: Sequence[tuple[int, int]],
+    ) -> list[DetectorResult]:
+        inputs = self._preprocess_batch(frames, target_sizes)
         with self._lock:
-            inputs = self._preprocess(frame, target_size)
+            if self._closed:
+                raise RuntimeError("TensorRT detector is closed")
             for name, array in inputs.items():
                 if not self.context.set_input_shape(name, tuple(array.shape)):
                     raise RuntimeError(f"TensorRT rejected input shape {array.shape} for {name}")
             outputs = self._output_arrays()
             self._execute(inputs, outputs)
 
-        labels = outputs["labels"][0].astype(np.int64, copy=False)
-        boxes = outputs["boxes"][0].astype(np.float32, copy=False)
-        scores = outputs["scores"][0].astype(np.float32, copy=False)
-        return postprocess_detections(labels, boxes, scores, self.settings, target_size)
+        batch_size = len(frames)
+        for name, array in outputs.items():
+            if array.ndim == 0 or array.shape[0] != batch_size:
+                raise RuntimeError(
+                    f"TensorRT output {name!r} has shape {array.shape}, expected a batch of {batch_size}"
+                )
+        return [
+            postprocess_detections(
+                outputs["labels"][index].astype(np.int64, copy=False),
+                outputs["boxes"][index].astype(np.float32, copy=False),
+                outputs["scores"][index].astype(np.float32, copy=False),
+                self.settings,
+                target_size,
+            )
+            for index, target_size in enumerate(target_sizes)
+        ]
+
+    def infer_batch(
+        self,
+        frames: Sequence[np.ndarray],
+        target_sizes: Sequence[tuple[int, int]],
+    ) -> list[DetectorResult]:
+        if len(frames) != len(target_sizes):
+            raise ValueError("frames and target_sizes must have the same length")
+        results: list[DetectorResult] = []
+        for start in range(0, len(frames), self._batch_capacity):
+            stop = min(start + self._batch_capacity, len(frames))
+            results.extend(self._infer_chunk(frames[start:stop], target_sizes[start:stop]))
+        return results
+
+    def infer(self, frame: np.ndarray, target_size: tuple[int, int]) -> DetectorResult:
+        return self.infer_batch([frame], [target_size])[0]
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        for pointer, _ in self._buffers.values():
-            self._cuda(self.cudart.cudaFree(pointer), "free inference buffer")
-        self._buffers.clear()
-        self._cuda(self.cudart.cudaStreamDestroy(self.stream), "destroy CUDA stream")
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            for pointer, _ in self._buffers.values():
+                self._cuda(self.cudart.cudaFree(pointer), "free inference buffer")
+            self._buffers.clear()
+            self._cuda(self.cudart.cudaStreamDestroy(self.stream), "destroy CUDA stream")
+            self._preprocess_executor.shutdown(wait=True, cancel_futures=True)

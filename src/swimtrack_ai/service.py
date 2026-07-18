@@ -196,16 +196,32 @@ class TrackingService:
         )[: self.settings.max_detections]
         return DetectorResult(person_candidates=candidates, accepted=accepted)
 
-    def _infer_frame(
+    def _infer_detector_batch(
+        self,
+        frames: list[np.ndarray],
+        target_sizes: list[tuple[int, int]],
+    ) -> list[DetectorResult]:
+        """Use the detector's batch path without requiring it from legacy test doubles."""
+
+        if len(frames) != len(target_sizes):
+            raise ValueError("frames and target_sizes must have the same length")
+        infer_batch = getattr(self.detector, "infer_batch", None)
+        if callable(infer_batch):
+            results = list(infer_batch(frames, target_sizes))
+        else:
+            results = [self.detector.infer(frame, target_size) for frame, target_size in zip(frames, target_sizes)]
+        if len(results) != len(frames):
+            raise RuntimeError(
+                f"Detector returned {len(results)} results for {len(frames)} input views"
+            )
+        return results
+
+    def _far_crop_view(
         self,
         frame: np.ndarray,
         target_size: tuple[int, int],
-        *,
-        use_far_crop: bool,
-    ) -> DetectorResult:
-        primary = self.detector.infer(frame, target_size)
-        if not self.settings.far_crop_enabled or not use_far_crop:
-            return primary
+    ) -> tuple[np.ndarray, tuple[int, int], tuple[float, float]]:
+        """Create one far-camera crop and its mapping back to the original image."""
 
         source_height, source_width = frame.shape[:2]
         left, top, right, bottom = self.settings.far_crop_box
@@ -220,11 +236,38 @@ class TrackingService:
         target_top = round(source_top * target_height / source_height)
         target_right = round(source_right * target_width / source_width)
         target_bottom = round(source_bottom * target_height / source_height)
-        supplemental = self.detector.infer(
+        return (
             cropped,
             (max(1, target_right - target_left), max(1, target_bottom - target_top)),
+            (target_left, target_top),
         )
-        return self._merge_detector_results(primary, supplemental, (target_left, target_top))
+
+    def _infer_frames(
+        self,
+        frames: list[np.ndarray],
+        metadata: BatchMetadata,
+        *,
+        use_far_crop: bool,
+    ) -> list[DetectorResult]:
+        """Batch detector views while preserving frame order for later ByteTrack updates."""
+
+        if len(frames) != len(metadata.frames):
+            raise ValueError("frames and metadata.frames must have the same length")
+        target_sizes = [(item.original_width, item.original_height) for item in metadata.frames]
+        if not self.settings.far_crop_enabled or not use_far_crop:
+            return self._infer_detector_batch(frames, target_sizes)
+
+        cropped_views = [self._far_crop_view(frame, target_size) for frame, target_size in zip(frames, target_sizes)]
+        detector_results = self._infer_detector_batch(
+            [*frames, *(crop[0] for crop in cropped_views)],
+            [*target_sizes, *(crop[1] for crop in cropped_views)],
+        )
+        primary = detector_results[: len(frames)]
+        supplemental = detector_results[len(frames) :]
+        return [
+            self._merge_detector_results(primary_result, supplemental_result, crop[2])
+            for primary_result, supplemental_result, crop in zip(primary, supplemental, cropped_views)
+        ]
 
     def _tracking_diagnostics(
         self,
@@ -287,6 +330,23 @@ class TrackingService:
                 if self._sessions.pop(session_id, None) is None:
                     raise SessionNotFoundError(f"Tracking session {session_id!r} does not exist")
 
+    def next_sequence(self, session_id: str) -> int:
+        """Return the next accepted sequence without exposing mutable session state."""
+
+        with self._sessions_lock:
+            state = self._sessions.get(session_id)
+        if state is None:
+            raise SessionNotFoundError(f"Tracking session {session_id!r} does not exist")
+        with state.lock:
+            with self._sessions_lock:
+                if self._sessions.get(session_id) is not state:
+                    raise SessionNotFoundError(f"Tracking session {session_id!r} does not exist")
+            if state.expires_at <= self.clock():
+                with self._sessions_lock:
+                    self._sessions.pop(session_id, None)
+                raise SessionNotFoundError(f"Tracking session {session_id!r} expired")
+            return state.next_sequence
+
     def expire_sessions(self) -> int:
         now = self.clock()
         expired = []
@@ -347,14 +407,11 @@ class TrackingService:
                 raise ConflictError("time_ms must not move backwards across batches")
 
             # Infer every frame before mutating ByteTrack. Detector failures are safe to retry.
-            detector_results = [
-                self._infer_frame(
-                    frame,
-                    (item.original_width, item.original_height),
-                    use_far_crop=state.lap_analyzer is not None,
-                )
-                for frame, item in zip(frames, metadata.frames)
-            ]
+            detector_results = self._infer_frames(
+                frames,
+                metadata,
+                use_far_crop=state.lap_analyzer is not None,
+            )
             frame_results: list[FrameResult] = []
             try:
                 for detector_result, item in zip(detector_results, metadata.frames):

@@ -35,3 +35,15 @@ class PayloadTooLargeError(ServiceError):
 class InvalidFrameError(ServiceError):
     status_code = 422
     code = "invalid_frame"
+
+
+class InvalidVideoError(ServiceError):
+    status_code = 422
+    code = "invalid_video"
+
+
+class NvdecDecodeError(ServiceError):
+    """The GPU-only FFmpeg decode path could not produce usable frames."""
+
+    status_code = 503
+    code = "nvdec_decode_failed"
