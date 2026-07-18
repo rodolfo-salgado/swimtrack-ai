@@ -144,6 +144,9 @@ def test_session_batch_coordinates_and_delete(client: TestClient) -> None:
     assert body["frames"][0]["boxes"][0]["id"] == 1
     assert body["frames"][0]["boxes"][0]["x1"] >= 14
     assert "lap_scores" not in body["frames"][0]
+    assert float(response.headers["x-swimtrack-decode-ms"]) >= 0
+    assert float(response.headers["x-swimtrack-process-ms"]) >= 0
+    assert float(response.headers["x-swimtrack-total-ms"]) >= 0
     deleted = client.delete(
         f"/v1/tracking-sessions/{session_id}",
         headers={"X-Swimtrack-Auth": "test-secret"},

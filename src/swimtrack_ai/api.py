@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -199,10 +200,12 @@ def create_app(
     )
     async def process_batch(
         request: Request,
+        response: Response,
         session_id: str,
         frames: Annotated[list[UploadFile], File(description="Ordered JPEG, PNG, or WebP frames")],
         metadata: Annotated[str, Form(description="JSON BatchMetadata in the same order as frames")],
     ) -> BatchResult:
+        request_started = time.perf_counter()
         service = ready_service(request)
         if len(metadata.encode("utf-8")) > settings.max_metadata_bytes:
             raise PayloadTooLargeError(f"Batch metadata is limited to {settings.max_metadata_bytes} bytes")
@@ -242,12 +245,18 @@ def create_app(
 
         canonical_metadata = parsed_metadata.model_dump_json()
         fingerprint = service.fingerprint(canonical_metadata, encoded_frames)
-        return await anyio.to_thread.run_sync(
+        processing_started = time.perf_counter()
+        result = await anyio.to_thread.run_sync(
             service.process_batch,
             session_id,
             parsed_metadata,
             decoded_frames,
             fingerprint,
         )
+        completed = time.perf_counter()
+        response.headers["X-Swimtrack-Decode-Ms"] = f"{(processing_started - request_started) * 1000.0:.3f}"
+        response.headers["X-Swimtrack-Process-Ms"] = f"{(completed - processing_started) * 1000.0:.3f}"
+        response.headers["X-Swimtrack-Total-Ms"] = f"{(completed - request_started) * 1000.0:.3f}"
+        return result
 
     return app

@@ -185,6 +185,8 @@ Los frames transportados pueden estar redimensionados a 640×640. `original_widt
 
 `lap_score` y `no_lap_score` son scores heurísticos continuos, no probabilidades calibradas ni un conteo definitivo. El score combina cercanía a la pared, aproximación, reversión, salida y calidad local de tracking. `trajectory-v4` sólo habilita candidatos después de observar al nadador dentro de la zona interior del carril; así una salida que comienza junto a la pared no se confunde con una vuelta. Cuando ByteTrack no mantiene un track, el análisis usa las detecciones de la ROI del carril y puede unir ambos lados de una oclusión de hasta 6 segundos, reduciendo la confianza según la duración del gap. `candidate_episode_id` identifica una visita completa a la pared y agrupa todos sus candidatos, mientras que `candidate_time_ms` conserva el instante estimado de contacto. Si falta suficiente trayectoria, `evaluable` es `false` y `no_lap_score` se omite para no convertir ausencia de observación en evidencia de `no_lap`.
 
+Las respuestas `200` incluyen los headers `X-Swimtrack-Decode-Ms`, `X-Swimtrack-Process-Ms` y `X-Swimtrack-Total-Ms`. Miden, respectivamente, la lectura/decodificación multipart, el procesamiento serializado de la sesión (inference y tracking) y el total de la ruta; el Front los registra por batch sin alterar el JSON del contrato.
+
 ### Calibración fija de carril
 
 La calibración `fixed-camera-v1` proviene de `mpv-shot0001.jpg` (1041×1041) y usa coordenadas normalizadas, por lo que también aplica a los videos originales 1080×1080 mientras no cambien el crop ni la cámara. Sólo el carril central es visible de pared a pared.
