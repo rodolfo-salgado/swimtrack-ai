@@ -61,6 +61,24 @@ def test_postprocess_exposes_low_score_person_candidates_before_runtime_filters(
     assert result.accepted[0].tolist() == [0.0, 0.0, 31.0, 23.0, 0.800000011920929]
 
 
+def test_postprocess_defers_max_detections_until_lane_routing(tmp_path: Path) -> None:
+    settings = Settings(
+        backend="fake",
+        auth_token="test-secret",
+        model_source_dir=tmp_path,
+        model_cache_dir=tmp_path,
+        max_detections=1,
+    )
+    labels = np.asarray([0, 0], dtype=np.int64)
+    boxes = np.asarray([[0, 0, 100, 100], [500, 200, 530, 230]], dtype=np.float32)
+    scores = np.asarray([0.99, 0.20], dtype=np.float32)
+
+    result = postprocess_detections(labels, boxes, scores, settings, (1080, 1080))
+
+    assert result.accepted.shape == (2, 5)
+    assert result.accepted[:, 4].tolist() == pytest.approx([0.99, 0.20])
+
+
 class _Tensor:
     def __init__(self, shape: tuple[int, ...]) -> None:
         self.shape = shape

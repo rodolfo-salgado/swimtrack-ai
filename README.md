@@ -215,11 +215,13 @@ Las respuestas exitosas incluyen `X-Swimtrack-Decode-Path: nvdec` y `X-Swimtrack
 
 La calibración `fixed-camera-v1` proviene de `mpv-shot0001.jpg` (1041×1041) y usa coordenadas normalizadas, por lo que también aplica a los videos originales 1080×1080 mientras no cambien el crop ni la cámara. Sólo el carril central es visible de pared a pared.
 
-Con `SWIMTRACK_LANE_ROI_ENABLED=true`, las detecciones se asignan al polígono antes de ByteTrack y cada carril usa una instancia independiente del tracker. Las sesiones sin calibración mantienen el tracker global anterior.
+Con `SWIMTRACK_LANE_ROI_ENABLED=true`, las detecciones se asignan al polígono antes de ByteTrack y cada carril usa una instancia independiente del tracker. `SWIMTRACK_MAX_DETECTIONS` se aplica después de esa asignación, por carril, para que un falso positivo de score alto fuera de la ROI no expulse al nadador distante antes de validar su geometría. Las sesiones sin calibración mantienen el tracker global anterior.
 
-`SWIMTRACK_FAR_CROP_ENABLED=true` agrega una segunda inference únicamente para sesiones con calibración `fixed-camera-v1`. El crop normalizado configurable corresponde por default a `(320,120)–(760,560)` en 1080p, se redimensiona al mismo input TensorRT que el frame completo, remapea sus boxes a coordenadas originales y fusiona ambos resultados con NMS antes de la ROI y ByteTrack. El full-frame permanece activo para cubrir el resto del carril.
+`SWIMTRACK_FAR_CROP_ENABLED=true` agrega una segunda inference únicamente para sesiones con calibración `fixed-camera-v1`. El crop normalizado configurable corresponde por default a `(320,120)–(760,560)` en 1080p, se redimensiona al mismo input TensorRT que el frame completo, remapea sus boxes a coordenadas originales y fusiona ambos resultados con NMS antes de la ROI y ByteTrack. La puerta de ROI permite la extensión del extremo lejano sólo dentro de ese crop y con el margen lateral del carril, de modo que la zona nueva no se convierta en una puerta global de falsos positivos. El full-frame permanece activo para cubrir el resto del carril.
 
-La baseline seleccionada por el sweep de los videos 1 (`no_lap`) y 6 (`lap`) usa `SWIMTRACK_SCORE_THRESHOLD=0.15`, `SWIMTRACK_MIN_BOX_AREA=250`, `SWIMTRACK_TRACK_THRESHOLD=0.45`, `SWIMTRACK_TRACK_BUFFER=60`, `SWIMTRACK_MATCH_THRESHOLD=0.80` y `SWIMTRACK_LANE_ROI_ENABLED=true`. Estos son también los defaults de `Settings`, Compose y `.env.example`; siguen siendo configurables por environment para repetir experimentos.
+`SWIMTRACK_WEAK_REACTIVATION_ENABLED=true` conserva de forma conservadora un track perdido en una sesión calibrada si aparece una persona de score bajo dentro de la ROI: no crea tracks nuevos, exige área mínima, un gap máximo y una distancia normalizada máxima respecto al último centro conocido. Sólo usa scores desde el umbral débil y estrictamente bajo `SWIMTRACK_SCORE_THRESHOLD`, para que una detección ya consumida por ByteTrack no pueda reactivar una segunda identidad. Los defaults son score `0.10`, área `64 px²`, gap `1 s` y distancia `0.10`; se informan por frame en diagnostics para medir las reacquisiciones antes de ajustar sus límites.
+
+La baseline seleccionada por el sweep de los videos 1 (`no_lap`) y 6 (`lap`) usa `SWIMTRACK_SCORE_THRESHOLD=0.15`, `SWIMTRACK_MIN_BOX_AREA=250`, `SWIMTRACK_TRACK_THRESHOLD=0.45`, `SWIMTRACK_TRACK_BUFFER=60`, `SWIMTRACK_MATCH_THRESHOLD=0.80`, `SWIMTRACK_LANE_ROI_ENABLED=true` y la reacquisición débil anterior. Estos son también los defaults de `Settings`, Compose y `.env.example`; siguen siendo configurables por environment para repetir experimentos.
 
 ```text
 visible_polygon = [(0.4463,0.1583), (0.5815,0.1583), (1.0000,0.6630), (1.0000,0.9769), (0.0000,0.9769), (0.0000,0.6824)]
@@ -247,6 +249,10 @@ El backend fake detecta regiones claras en frames y permite probar el contrato c
 ```bash
 SWIMTRACK_BACKEND=fake SWIMTRACK_AUTH_TOKEN=local-test uv run uvicorn swimtrack_ai.main:app --port 8001
 ```
+
+## Benchmark reproducible de los videos 1–8
+
+[`docs/BENCHMARK_TEST_VIDEOS.md`](docs/BENCHMARK_TEST_VIDEOS.md) describe el runner `scripts/benchmark_test_videos.py`. El modo `diagnose` funciona sin GPU y el modo `remote` compara el transporte de MP4 original con NVDEC contra el transporte histórico JPEG, conservando diagnósticos por etapa y la configuración efectiva de tracking. `test09` queda excluido explícitamente.
 
 Tests y lint:
 

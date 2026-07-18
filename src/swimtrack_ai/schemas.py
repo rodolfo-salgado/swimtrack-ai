@@ -30,6 +30,12 @@ class TrackingConfiguration(BaseModel):
     far_crop_nms_threshold: float
     effective_lost_buffer_frames: int
     effective_lost_buffer_seconds: float
+    weak_reactivation_enabled: bool
+    weak_reactivation_score_threshold: float
+    weak_reactivation_min_box_area: float
+    weak_reactivation_max_gap_frames: int
+    weak_reactivation_max_gap_seconds: float
+    weak_reactivation_max_center_distance: float
 
 
 class SessionCreated(BaseModel):
@@ -93,14 +99,17 @@ class DiagnosticStage(BaseModel):
 class LaneTrackingDiagnostics(BaseModel):
     lane_id: str
     after_roi: DiagnosticStage
+    weak_candidates_after_roi: DiagnosticStage
     active_track_ids: list[int]
     retained_lost_track_count: int = Field(ge=0)
+    weak_reactivated_track_ids: list[int] = Field(default_factory=list)
 
 
 class FrameTrackingDiagnostics(BaseModel):
     diagnostic_floor: float = Field(ge=0, le=1)
     person_candidates: DiagnosticStage
     detector_accepted: DiagnosticStage
+    weak_candidates: DiagnosticStage
     lanes: list[LaneTrackingDiagnostics]
 
 

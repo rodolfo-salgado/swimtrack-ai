@@ -46,6 +46,11 @@ class Settings:
     match_threshold: float = 0.80
     mot20: bool = False
     lane_roi_enabled: bool = True
+    weak_reactivation_enabled: bool = True
+    weak_reactivation_score_threshold: float = 0.10
+    weak_reactivation_min_box_area: float = 64.0
+    weak_reactivation_max_gap_seconds: float = 1.0
+    weak_reactivation_max_center_distance: float = 0.10
     far_crop_enabled: bool = False
     far_crop_left: float = 0.2962962963
     far_crop_top: float = 0.1111111111
@@ -83,6 +88,18 @@ class Settings:
             raise ValueError("track_threshold must be between zero and one")
         if not 0.0 <= self.match_threshold <= 1.0:
             raise ValueError("match_threshold must be between zero and one")
+        weak_reactivation_score_ceiling = min(self.score_threshold, self.track_threshold)
+        if not self.diagnostic_score_floor <= self.weak_reactivation_score_threshold < weak_reactivation_score_ceiling:
+            raise ValueError(
+                "weak_reactivation_score_threshold must be at least diagnostic_score_floor "
+                "and below ordinary thresholds"
+            )
+        if self.weak_reactivation_min_box_area < 0:
+            raise ValueError("weak_reactivation_min_box_area must not be negative")
+        if self.weak_reactivation_max_gap_seconds <= 0:
+            raise ValueError("weak_reactivation_max_gap_seconds must be greater than zero")
+        if not 0.0 < self.weak_reactivation_max_center_distance <= 1.0:
+            raise ValueError("weak_reactivation_max_center_distance must be in (0, 1]")
         if not (
             0.0 <= self.far_crop_left < self.far_crop_right <= 1.0
             and 0.0 <= self.far_crop_top < self.far_crop_bottom <= 1.0
@@ -123,6 +140,11 @@ class Settings:
             match_threshold=_floating("MATCH_THRESHOLD", 0.80),
             mot20=_boolean("MOT20", False),
             lane_roi_enabled=_boolean("LANE_ROI_ENABLED", True),
+            weak_reactivation_enabled=_boolean("WEAK_REACTIVATION_ENABLED", True),
+            weak_reactivation_score_threshold=_floating("WEAK_REACTIVATION_SCORE_THRESHOLD", 0.10),
+            weak_reactivation_min_box_area=_floating("WEAK_REACTIVATION_MIN_BOX_AREA", 64.0),
+            weak_reactivation_max_gap_seconds=_floating("WEAK_REACTIVATION_MAX_GAP_SECONDS", 1.0),
+            weak_reactivation_max_center_distance=_floating("WEAK_REACTIVATION_MAX_CENTER_DISTANCE", 0.10),
             far_crop_enabled=_boolean("FAR_CROP_ENABLED", False),
             far_crop_left=_floating("FAR_CROP_LEFT", 0.2962962963),
             far_crop_top=_floating("FAR_CROP_TOP", 0.1111111111),

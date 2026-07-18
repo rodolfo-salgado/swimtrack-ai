@@ -44,6 +44,8 @@ class SessionState:
     lane_router: LaneRouter
     lap_analyzer: LapAnalyzer | None
     diagnostics_level: DiagnosticsLevel
+    weak_reactivation_enabled: bool
+    weak_reactivation_max_gap_frames: int
     expires_at: float
     next_sequence: int = 0
     last_frame_index: int | None = None
@@ -75,24 +77,37 @@ class TrackingService:
         diagnostics: DiagnosticsLevel = "none",
     ) -> SessionCreated:
         self.expire_sessions()
+        tracker_frame_rate = max(1, round(fps))
+        effective_buffer_frames = int(tracker_frame_rate / 30.0 * self.settings.track_buffer)
+        weak_reactivation_max_gap_frames = max(
+            1,
+            round(tracker_frame_rate * self.settings.weak_reactivation_max_gap_seconds),
+        )
         with self._sessions_lock:
             if len(self._sessions) >= self.settings.max_sessions:
                 raise SessionCapacityError("Maximum number of active tracking sessions reached")
             session_id = str(uuid.uuid4())
+            far_crop_box = (
+                self.settings.far_crop_box
+                if self.settings.far_crop_enabled and lap_calibration_id is not None
+                else None
+            )
             lane_router = LaneRouter(
                 lap_calibration_id,
                 enabled=self.settings.lane_roi_enabled,
+                far_crop_box=far_crop_box,
             )
+            weak_reactivation_enabled = self.settings.weak_reactivation_enabled and lane_router.enabled
             self._sessions[session_id] = SessionState(
                 session_id=session_id,
                 trackers={lane_id: self.tracker_factory(fps) for lane_id in lane_router.lane_ids},
                 lane_router=lane_router,
                 lap_analyzer=LapAnalyzer(fps, lap_calibration_id) if lap_calibration_id is not None else None,
                 diagnostics_level=diagnostics,
+                weak_reactivation_enabled=weak_reactivation_enabled,
+                weak_reactivation_max_gap_frames=weak_reactivation_max_gap_frames,
                 expires_at=self.clock() + self.settings.session_ttl_seconds,
             )
-        tracker_frame_rate = max(1, round(fps))
-        effective_buffer_frames = int(tracker_frame_rate / 30.0 * self.settings.track_buffer)
         return SessionCreated(
             session_id=session_id,
             next_sequence=0,
@@ -108,15 +123,17 @@ class TrackingService:
                     mot20=self.settings.mot20,
                     lane_roi_enabled=lane_router.enabled,
                     lane_ids=list(lane_router.lane_ids),
-                    far_crop_enabled=self.settings.far_crop_enabled and lap_calibration_id is not None,
-                    far_crop_box=(
-                        list(self.settings.far_crop_box)
-                        if self.settings.far_crop_enabled and lap_calibration_id is not None
-                        else None
-                    ),
+                    far_crop_enabled=far_crop_box is not None,
+                    far_crop_box=list(far_crop_box) if far_crop_box is not None else None,
                     far_crop_nms_threshold=self.settings.far_crop_nms_threshold,
                     effective_lost_buffer_frames=effective_buffer_frames,
                     effective_lost_buffer_seconds=effective_buffer_frames / tracker_frame_rate,
+                    weak_reactivation_enabled=weak_reactivation_enabled,
+                    weak_reactivation_score_threshold=self.settings.weak_reactivation_score_threshold,
+                    weak_reactivation_min_box_area=self.settings.weak_reactivation_min_box_area,
+                    weak_reactivation_max_gap_frames=weak_reactivation_max_gap_frames,
+                    weak_reactivation_max_gap_seconds=self.settings.weak_reactivation_max_gap_seconds,
+                    weak_reactivation_max_center_distance=self.settings.weak_reactivation_max_center_distance,
                 )
                 if diagnostics != "none"
                 else None
@@ -193,8 +210,16 @@ class TrackingService:
         accepted = self._nms(
             np.concatenate((primary.accepted, crop_accepted), axis=0),
             self.settings.far_crop_nms_threshold,
-        )[: self.settings.max_detections]
+        )
         return DetectorResult(person_candidates=candidates, accepted=accepted)
+
+    def _limit_routed_detections(self, routed_detections: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """Apply the detection cap only after calibrated lane routing."""
+
+        return {
+            lane_id: detections[: self.settings.max_detections]
+            for lane_id, detections in routed_detections.items()
+        }
 
     def _infer_detector_batch(
         self,
@@ -225,10 +250,15 @@ class TrackingService:
 
         source_height, source_width = frame.shape[:2]
         left, top, right, bottom = self.settings.far_crop_box
-        source_left = int(np.floor(left * source_width))
-        source_top = int(np.floor(top * source_height))
-        source_right = int(np.ceil(right * source_width))
-        source_bottom = int(np.ceil(bottom * source_height))
+        # The fixed-camera crop coordinates intentionally fall on whole source pixels
+        # at 1080p. Guard against their decimal representation landing infinitesimally
+        # below or above that pixel; otherwise the crop and its calibrated ROI disagree
+        # by one source pixel at the far end.
+        coordinate_epsilon = 1e-6
+        source_left = int(np.floor(left * source_width + coordinate_epsilon))
+        source_top = int(np.floor(top * source_height + coordinate_epsilon))
+        source_right = int(np.ceil(right * source_width - coordinate_epsilon))
+        source_bottom = int(np.ceil(bottom * source_height - coordinate_epsilon))
         cropped = frame[source_top:source_bottom, source_left:source_right]
 
         target_width, target_height = target_size
@@ -272,7 +302,9 @@ class TrackingService:
     def _tracking_diagnostics(
         self,
         detector_result: DetectorResult,
+        weak_candidates: np.ndarray,
         routed_detections: dict[str, np.ndarray],
+        routed_weak_candidates: dict[str, np.ndarray],
         tracker_updates: dict[str, TrackerUpdate],
         level: DiagnosticsLevel,
     ) -> FrameTrackingDiagnostics | None:
@@ -282,16 +314,57 @@ class TrackingService:
             diagnostic_floor=self.settings.diagnostic_score_floor,
             person_candidates=self._diagnostic_stage(detector_result.person_candidates, level),
             detector_accepted=self._diagnostic_stage(detector_result.accepted, level),
+            weak_candidates=self._diagnostic_stage(weak_candidates, level),
             lanes=[
                 LaneTrackingDiagnostics(
                     lane_id=lane_id,
                     after_roi=self._diagnostic_stage(routed_detections[lane_id], level),
+                    weak_candidates_after_roi=self._diagnostic_stage(routed_weak_candidates[lane_id], level),
                     active_track_ids=[int(track.track_id) for track in tracker_updates[lane_id].active_tracks],
                     retained_lost_track_count=tracker_updates[lane_id].retained_lost_track_count,
+                    weak_reactivated_track_ids=tracker_updates[lane_id].weak_reactivated_track_ids,
                 )
                 for lane_id in routed_detections
             ],
         )
+
+    def _weak_candidates(self, detector_result: DetectorResult) -> np.ndarray:
+        candidates = detector_result.person_candidates
+        if not len(candidates):
+            return np.empty((0, 5), dtype=np.float32)
+        widths = np.maximum(0.0, candidates[:, 2] - candidates[:, 0])
+        heights = np.maximum(0.0, candidates[:, 3] - candidates[:, 1])
+        areas = widths * heights
+        # A candidate accepted by the ordinary detector path may already be
+        # associated to an active ByteTrack track in this same update. Keep the
+        # manual recovery path strictly below that acceptance threshold so one
+        # detection cannot be consumed by both association paths.
+        weak_score_ceiling = min(self.settings.score_threshold, self.settings.track_threshold)
+        mask = (
+            (candidates[:, 4] >= self.settings.weak_reactivation_score_threshold)
+            & (candidates[:, 4] < weak_score_ceiling)
+            & (areas >= self.settings.weak_reactivation_min_box_area)
+        )
+        return candidates[mask].astype(np.float32, copy=False)
+
+    def _update_tracker(
+        self,
+        tracker: Tracker,
+        detections: np.ndarray,
+        weak_detections: np.ndarray,
+        image_size: tuple[int, int],
+        state: SessionState,
+    ) -> TrackerUpdate:
+        update_with_weak_candidates = getattr(tracker, "update_with_weak_candidates", None)
+        if state.weak_reactivation_enabled and callable(update_with_weak_candidates):
+            return update_with_weak_candidates(
+                detections,
+                weak_detections,
+                image_size,
+                max_gap_frames=state.weak_reactivation_max_gap_frames,
+                max_center_distance=self.settings.weak_reactivation_max_center_distance,
+            )
+        return tracker.update(detections, image_size)
 
     @staticmethod
     def _lap_analysis_boxes(
@@ -416,9 +489,23 @@ class TrackingService:
             try:
                 for detector_result, item in zip(detector_results, metadata.frames):
                     image_size = (item.original_width, item.original_height)
-                    routed_detections = state.lane_router.route(detector_result.accepted, image_size)
+                    routed_detections = self._limit_routed_detections(
+                        state.lane_router.route(detector_result.accepted, image_size)
+                    )
+                    weak_candidates = (
+                        self._weak_candidates(detector_result)
+                        if state.weak_reactivation_enabled
+                        else np.empty((0, 5), dtype=np.float32)
+                    )
+                    routed_weak_candidates = state.lane_router.route(weak_candidates, image_size)
                     tracker_updates = {
-                        lane_id: state.trackers[lane_id].update(detections, image_size)
+                        lane_id: self._update_tracker(
+                            state.trackers[lane_id],
+                            detections,
+                            routed_weak_candidates[lane_id],
+                            image_size,
+                            state,
+                        )
                         for lane_id, detections in routed_detections.items()
                     }
                     boxes = []
@@ -456,7 +543,9 @@ class TrackingService:
                             ),
                             tracking_diagnostics=self._tracking_diagnostics(
                                 detector_result,
+                                weak_candidates,
                                 routed_detections,
+                                routed_weak_candidates,
                                 tracker_updates,
                                 state.diagnostics_level,
                             ),

@@ -51,11 +51,36 @@ def perspective_matrix(calibration: LaneCalibration) -> np.ndarray:
 class LaneRouter:
     """Assign accepted detections to at most one calibrated lane."""
 
-    def __init__(self, calibration_id: str | None, *, enabled: bool, margin: float = 0.05) -> None:
+    def __init__(
+        self,
+        calibration_id: str | None,
+        *,
+        enabled: bool,
+        margin: float = 0.05,
+        far_crop_box: tuple[float, float, float, float] | None = None,
+    ) -> None:
         self.enabled = enabled and calibration_id is not None
         self.margin = margin
+        self._far_crop_box = self._validated_far_crop_box(far_crop_box) if self.enabled else None
         self._lanes = lanes_for_calibration(calibration_id) if self.enabled and calibration_id is not None else ()
         self._matrices = {lane.lane_id: perspective_matrix(lane) for lane in self._lanes}
+
+    @staticmethod
+    def _validated_far_crop_box(
+        far_crop_box: tuple[float, float, float, float] | None,
+    ) -> tuple[float, float, float, float] | None:
+        if far_crop_box is None:
+            return None
+        left, top, right, bottom = far_crop_box
+        if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
+            raise ValueError("far_crop_box must define a non-empty normalized rectangle")
+        return far_crop_box
+
+    def _is_in_far_crop(self, normalized_x: float, normalized_y: float) -> bool:
+        if self._far_crop_box is None:
+            return False
+        left, top, right, bottom = self._far_crop_box
+        return left <= normalized_x <= right and top <= normalized_y <= bottom
 
     @property
     def lane_ids(self) -> tuple[str, ...]:
@@ -67,16 +92,20 @@ class LaneRouter:
         routed: dict[str, list[np.ndarray]] = {lane_id: [] for lane_id in self.lane_ids}
         width, height = image_size
         for detection in detections:
+            normalized_x = float((detection[0] + detection[2]) / (2.0 * width))
+            normalized_y = float((detection[1] + detection[3]) / (2.0 * height))
             center = np.asarray(
-                [[[(detection[0] + detection[2]) / (2.0 * width), (detection[1] + detection[3]) / (2.0 * height)]]],
+                [[[normalized_x, normalized_y]]],
                 dtype=np.float32,
             )
             candidates: list[tuple[float, str]] = []
             for lane_id, matrix in self._matrices.items():
                 lane_x, position = cv2.perspectiveTransform(center, matrix)[0, 0]
+                in_nominal_lane_range = -self.margin <= position <= 1.0 + self.margin
+                in_far_crop_extension = position < -self.margin and self._is_in_far_crop(normalized_x, normalized_y)
                 if (
                     -self.margin <= lane_x <= 1.0 + self.margin
-                    and -self.margin <= position <= 1.0 + self.margin
+                    and (in_nominal_lane_range or in_far_crop_extension)
                 ):
                     candidates.append((abs(float(lane_x) - 0.5), lane_id))
             if candidates:

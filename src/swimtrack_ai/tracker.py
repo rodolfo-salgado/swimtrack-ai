@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import sys
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Protocol
@@ -18,6 +18,7 @@ from swimtrack_ai.config import Settings
 class TrackerUpdate:
     active_tracks: list
     retained_lost_track_count: int = 0
+    weak_reactivated_track_ids: list[int] = field(default_factory=list)
 
 
 class Tracker(Protocol):
@@ -108,6 +109,122 @@ class ByteTrackAdapter:
         return TrackerUpdate(
             active_tracks=active_tracks,
             retained_lost_track_count=len(self._tracker.lost_stracks),
+        )
+
+    @staticmethod
+    def _as_detections(detections: np.ndarray) -> np.ndarray:
+        array = np.asarray(detections, dtype=np.float32)
+        if array.size == 0:
+            return np.empty((0, 5), dtype=np.float32)
+        if array.ndim != 2 or array.shape[1] != 5:
+            raise ValueError("weak detections must be an Nx5 array")
+        return array
+
+    @staticmethod
+    def _center_distance(
+        track,
+        detection: np.ndarray,
+        image_size: tuple[int, int],
+    ) -> float:
+        width, height = image_size
+        if width <= 0 or height <= 0:
+            raise ValueError("image_size must be positive")
+        track_box = np.asarray(track.tlbr, dtype=np.float32)
+        track_center = (track_box[:2] + track_box[2:]) / 2.0
+        detection_center = (detection[:2] + detection[2:4]) / 2.0
+        offset = (track_center - detection_center) / np.asarray((width, height), dtype=np.float32)
+        return float(np.linalg.norm(offset))
+
+    def update_with_weak_candidates(
+        self,
+        detections: np.ndarray,
+        weak_detections: np.ndarray,
+        image_size: tuple[int, int],
+        *,
+        max_gap_frames: int,
+        max_center_distance: float,
+    ) -> TrackerUpdate:
+        """Re-activate recently lost tracks with lane-gated weak detector evidence.
+
+        The caller is responsible for routing candidates to one calibrated lane and
+        filtering their score and area. Weak detections never enter ByteTrack's
+        ordinary update path, so they cannot initialize a new track. They can only
+        re-activate a retained lost track after an explicit temporal and spatial
+        gate succeeds.
+        """
+
+        if max_gap_frames < 1:
+            raise ValueError("max_gap_frames must be at least one")
+        if not 0.0 < max_center_distance <= 1.0:
+            raise ValueError("max_center_distance must be in (0, 1]")
+
+        width, height = image_size
+        active_tracks = list(self._tracker.update(detections, [height, width], [height, width]))
+        candidates = self._as_detections(weak_detections)
+        if not len(candidates) or not self._tracker.lost_stracks:
+            return TrackerUpdate(
+                active_tracks=active_tracks,
+                retained_lost_track_count=len(self._tracker.lost_stracks),
+            )
+
+        next_frame_id = int(self._tracker.frame_id)
+        eligible_tracks = [
+            track
+            for track in self._tracker.lost_stracks
+            if 0 < next_frame_id - int(track.end_frame) <= max_gap_frames
+        ]
+        if not eligible_tracks:
+            return TrackerUpdate(
+                active_tracks=active_tracks,
+                retained_lost_track_count=len(self._tracker.lost_stracks),
+            )
+
+        unmatched_tracks = list(eligible_tracks)
+        matches: list[tuple[object, np.ndarray]] = []
+        for candidate in candidates[np.argsort(candidates[:, 4], kind="stable")[::-1]]:
+            nearby = [
+                (self._center_distance(track, candidate, image_size), index, track)
+                for index, track in enumerate(unmatched_tracks)
+            ]
+            nearby = [item for item in nearby if item[0] <= max_center_distance]
+            if not nearby:
+                continue
+            _distance, index, track = min(nearby, key=lambda item: item[0])
+            matches.append((track, candidate))
+            del unmatched_tracks[index]
+
+        if not matches:
+            return TrackerUpdate(
+                active_tracks=active_tracks,
+                retained_lost_track_count=len(self._tracker.lost_stracks),
+            )
+
+        reactivated_ids: list[int] = []
+        for track, candidate in matches:
+            detection_type = type(track)
+            detection = detection_type(
+                detection_type.tlbr_to_tlwh(np.asarray(candidate[:4], dtype=np.float32)),
+                float(candidate[4]),
+            )
+            track.re_activate(detection, next_frame_id, new_id=False)
+            reactivated_ids.append(int(track.track_id))
+
+        reactivated_set = set(reactivated_ids)
+        existing_ids = {int(track.track_id) for track in self._tracker.tracked_stracks}
+        for track, _candidate in matches:
+            if int(track.track_id) not in existing_ids:
+                self._tracker.tracked_stracks.append(track)
+                existing_ids.add(int(track.track_id))
+            if all(int(active.track_id) != int(track.track_id) for active in active_tracks):
+                active_tracks.append(track)
+        self._tracker.lost_stracks = [
+            track for track in self._tracker.lost_stracks if int(track.track_id) not in reactivated_set
+        ]
+
+        return TrackerUpdate(
+            active_tracks=active_tracks,
+            retained_lost_track_count=len(self._tracker.lost_stracks),
+            weak_reactivated_track_ids=reactivated_ids,
         )
 
 

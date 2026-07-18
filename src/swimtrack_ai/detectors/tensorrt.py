@@ -50,7 +50,11 @@ def postprocess_detections(
         & (scores >= settings.score_threshold)
         & (areas >= settings.min_box_area)
     )
-    accepted = _as_detections(boxes[accepted_mask], scores[accepted_mask], target_size)[: settings.max_detections]
+    # Keep all runtime-accepted boxes until the calibrated lane ROI has had a
+    # chance to reject off-lane reflections. TrackingService applies the
+    # configured cap per routed lane, preserving the legacy global cap for
+    # uncalibrated sessions.
+    accepted = _as_detections(boxes[accepted_mask], scores[accepted_mask], target_size)
     return DetectorResult(person_candidates=person_candidates, accepted=accepted)
 
 

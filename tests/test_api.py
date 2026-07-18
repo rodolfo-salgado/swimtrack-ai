@@ -208,12 +208,15 @@ def test_tracking_diagnostics_are_opt_in(client: TestClient) -> None:
     diagnostics = frame["tracking_diagnostics"]
     assert diagnostics["person_candidates"] == {"count": 1}
     assert diagnostics["detector_accepted"] == {"count": 1}
+    assert diagnostics["weak_candidates"] == {"count": 0}
     assert diagnostics["lanes"] == [
         {
             "lane_id": "global",
             "after_roi": {"count": 1},
+            "weak_candidates_after_roi": {"count": 0},
             "active_track_ids": [1],
             "retained_lost_track_count": 0,
+            "weak_reactivated_track_ids": [],
         }
     ]
 
@@ -229,11 +232,17 @@ def test_box_diagnostics_include_candidates_and_effective_configuration(client: 
     assert configuration["diagnostic_score_floor"] == 0.05
     assert configuration["effective_lost_buffer_frames"] == 120
     assert configuration["effective_lost_buffer_seconds"] == 2.0
+    assert configuration["weak_reactivation_enabled"] is False
+    assert configuration["weak_reactivation_score_threshold"] == 0.10
+    assert configuration["weak_reactivation_max_gap_frames"] == 60
+    assert configuration["weak_reactivation_max_gap_seconds"] == 1.0
+    assert configuration["weak_reactivation_max_center_distance"] == 0.10
 
     response = submit(client, created.json()["session_id"], metadata("box-diagnostics", 0))
     diagnostics = response.json()["frames"][0]["tracking_diagnostics"]
     assert diagnostics["person_candidates"]["count"] == 1
     assert diagnostics["person_candidates"]["boxes"][0]["conf"] == pytest.approx(0.99)
+    assert diagnostics["weak_candidates"] == {"count": 0, "boxes": []}
     assert diagnostics["lanes"][0]["after_roi"]["boxes"][0]["x1"] >= 14
 
 

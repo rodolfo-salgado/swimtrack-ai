@@ -11,6 +11,11 @@ TRACKING_ENV_NAMES = (
     "TRACK_BUFFER",
     "MATCH_THRESHOLD",
     "LANE_ROI_ENABLED",
+    "WEAK_REACTIVATION_ENABLED",
+    "WEAK_REACTIVATION_SCORE_THRESHOLD",
+    "WEAK_REACTIVATION_MIN_BOX_AREA",
+    "WEAK_REACTIVATION_MAX_GAP_SECONDS",
+    "WEAK_REACTIVATION_MAX_CENTER_DISTANCE",
     "FAR_CROP_ENABLED",
 )
 
@@ -26,6 +31,11 @@ def test_selected_tracking_baseline_is_the_default(monkeypatch) -> None:
         assert settings.track_buffer == 60
         assert settings.match_threshold == 0.80
         assert settings.lane_roi_enabled is True
+        assert settings.weak_reactivation_enabled is True
+        assert settings.weak_reactivation_score_threshold == 0.10
+        assert settings.weak_reactivation_min_box_area == 64.0
+        assert settings.weak_reactivation_max_gap_seconds == 1.0
+        assert settings.weak_reactivation_max_center_distance == 0.10
         assert settings.far_crop_enabled is False
 
 
@@ -37,6 +47,33 @@ def test_far_crop_configuration_is_validated() -> None:
     ):
         with pytest.raises(ValueError):
             Settings(**values)
+
+
+def test_weak_reactivation_configuration_is_validated_and_loaded_from_environment(monkeypatch) -> None:
+    for values in (
+        {"weak_reactivation_score_threshold": 0.01},
+        {"weak_reactivation_score_threshold": 0.15},
+        {"weak_reactivation_score_threshold": 0.46},
+        {"weak_reactivation_min_box_area": -1.0},
+        {"weak_reactivation_max_gap_seconds": 0.0},
+        {"weak_reactivation_max_center_distance": 0.0},
+    ):
+        with pytest.raises(ValueError):
+            Settings(**values)
+
+    monkeypatch.setenv("SWIMTRACK_WEAK_REACTIVATION_ENABLED", "false")
+    monkeypatch.setenv("SWIMTRACK_WEAK_REACTIVATION_SCORE_THRESHOLD", "0.12")
+    monkeypatch.setenv("SWIMTRACK_WEAK_REACTIVATION_MIN_BOX_AREA", "80")
+    monkeypatch.setenv("SWIMTRACK_WEAK_REACTIVATION_MAX_GAP_SECONDS", "1.5")
+    monkeypatch.setenv("SWIMTRACK_WEAK_REACTIVATION_MAX_CENTER_DISTANCE", "0.08")
+
+    settings = Settings.from_env()
+
+    assert settings.weak_reactivation_enabled is False
+    assert settings.weak_reactivation_score_threshold == 0.12
+    assert settings.weak_reactivation_min_box_area == 80.0
+    assert settings.weak_reactivation_max_gap_seconds == 1.5
+    assert settings.weak_reactivation_max_center_distance == 0.08
 
 
 def test_tensorrt_batch_configuration_is_validated() -> None:
