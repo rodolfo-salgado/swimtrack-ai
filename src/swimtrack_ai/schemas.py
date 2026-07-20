@@ -13,6 +13,7 @@ class CreateSessionRequest(BaseModel):
     fps: float = Field(default=60.0, gt=0, le=240)
     lap_calibration_id: Literal["fixed-camera-v1"] | None = None
     diagnostics: DiagnosticsLevel = "none"
+    max_detection_distance_per_second: float | None = Field(default=None, gt=0, le=1)
 
 
 class TrackingConfiguration(BaseModel):

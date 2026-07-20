@@ -78,6 +78,7 @@ class TrackingService:
         fps: float,
         lap_calibration_id: str | None = None,
         diagnostics: DiagnosticsLevel = "none",
+        max_detection_distance_per_second: float | None = None,
     ) -> SessionCreated:
         self.expire_sessions()
         tracker_frame_rate = max(1, round(fps))
@@ -113,7 +114,11 @@ class TrackingService:
                     confirmation_confidence=self.settings.identity_confirmation_confidence,
                     tentative_max_gap_seconds=self.settings.identity_tentative_max_gap_seconds,
                     max_reassociation_gap_seconds=self.settings.identity_max_reassociation_gap_seconds,
-                    max_speed_per_second=self.settings.identity_max_speed_per_second,
+                    max_speed_per_second=(
+                        max_detection_distance_per_second
+                        if max_detection_distance_per_second is not None
+                        else self.settings.identity_max_speed_per_second
+                    ),
                     position_slack=self.settings.identity_position_slack,
                     max_lane_x_delta=self.settings.identity_max_lane_x_delta,
                     duplicate_iou=self.settings.identity_duplicate_iou,

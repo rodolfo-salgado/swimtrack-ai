@@ -277,6 +277,7 @@ def create_app(
             payload.fps,
             payload.lap_calibration_id,
             payload.diagnostics,
+            payload.max_detection_distance_per_second,
         )
 
     @app.delete(
