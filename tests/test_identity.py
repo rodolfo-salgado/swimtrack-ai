@@ -426,16 +426,16 @@ def test_single_observation_during_a_two_swimmer_crossing_does_not_exchange_ids(
         resolver,
         0.0,
         [
-            _candidate(10, lane_x=0.50, position=0.30),
-            _candidate(20, lane_x=0.50, position=0.70),
+            _candidate(10, lane_x=0.25, position=0.30),
+            _candidate(20, lane_x=0.75, position=0.70),
         ],
     )
     _resolve(
         resolver,
         1_000.0,
         [
-            _candidate(10, lane_x=0.50, position=0.40),
-            _candidate(20, lane_x=0.50, position=0.60),
+            _candidate(10, lane_x=0.25, position=0.40),
+            _candidate(20, lane_x=0.75, position=0.60),
         ],
     )
 
@@ -444,8 +444,8 @@ def test_single_observation_during_a_two_swimmer_crossing_does_not_exchange_ids(
         resolver,
         3_000.0,
         [
-            _candidate(88, lane_x=0.50, position=0.70),
-            _candidate(99, lane_x=0.50, position=0.30),
+            _candidate(88, lane_x=0.25, position=0.70),
+            _candidate(99, lane_x=0.75, position=0.30),
         ],
     )
 

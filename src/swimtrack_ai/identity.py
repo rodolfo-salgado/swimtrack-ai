@@ -485,12 +485,8 @@ class IdentityResolver:
             limit = self.max_speed_per_second * 2.0
             observed_position_velocity = float(np.clip(observed_position_velocity, -limit, limit))
             observed_lane_x_velocity = float(np.clip(observed_lane_x_velocity, -limit, limit))
-            # Use the latest observation as the dominant term.  A heavily
-            # smoothed velocity lags behind a swimmer after a short occlusion,
-            # which makes the nearest-position assignment prefer the swimmer
-            # travelling in the opposite direction after they cross.
-            identity.velocity_position = 0.3 * identity.velocity_position + 0.7 * observed_position_velocity
-            identity.velocity_lane_x = 0.3 * identity.velocity_lane_x + 0.7 * observed_lane_x_velocity
+            identity.velocity_position = 0.7 * identity.velocity_position + 0.3 * observed_position_velocity
+            identity.velocity_lane_x = 0.7 * identity.velocity_lane_x + 0.3 * observed_lane_x_velocity
         identity.last_seen_ms = time_ms
         identity.position = candidate.position
         identity.minimum_position = min(identity.minimum_position, candidate.position)
