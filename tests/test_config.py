@@ -19,6 +19,23 @@ TRACKING_ENV_NAMES = (
     "FAR_CROP_ENABLED",
 )
 
+IDENTITY_ENV_NAMES = (
+    "IDENTITY_CONFIRMATION_OBSERVATIONS",
+    "IDENTITY_CONFIRMATION_SECONDS",
+    "IDENTITY_CONFIRMATION_CONFIDENCE",
+    "IDENTITY_TENTATIVE_MAX_GAP_SECONDS",
+    "IDENTITY_MAX_REASSOCIATION_GAP_SECONDS",
+    "IDENTITY_MAX_SPEED_PER_SECOND",
+    "IDENTITY_POSITION_SLACK",
+    "IDENTITY_MAX_LANE_X_DELTA",
+    "IDENTITY_DUPLICATE_IOU",
+    "IDENTITY_DUPLICATE_POSITION_DELTA",
+    "IDENTITY_DUPLICATE_LANE_X_DELTA",
+    "IDENTITY_ADDITIONAL_MIN_POSITION_SPAN",
+    "IDENTITY_ADDITIONAL_COOCCURRENCE_MAX_GAP_SECONDS",
+    "IDENTITY_MAX_PER_LANE",
+)
+
 
 def test_selected_tracking_baseline_is_the_default(monkeypatch) -> None:
     for name in TRACKING_ENV_NAMES:
@@ -47,6 +64,42 @@ def test_far_crop_configuration_is_validated() -> None:
     ):
         with pytest.raises(ValueError):
             Settings(**values)
+
+
+def test_identity_configuration_has_conservative_defaults_and_is_validated(monkeypatch) -> None:
+    for name in IDENTITY_ENV_NAMES:
+        monkeypatch.delenv(f"SWIMTRACK_{name}", raising=False)
+
+    for settings in (Settings(), Settings.from_env()):
+        assert settings.identity_confirmation_observations == 3
+        assert settings.identity_confirmation_seconds == 0.20
+        assert settings.identity_confirmation_confidence == 0.18
+        assert settings.identity_tentative_max_gap_seconds == 0.75
+        assert settings.identity_max_reassociation_gap_seconds == 12.0
+        assert settings.identity_max_per_lane == 2
+
+    for values in (
+        {"identity_confirmation_observations": 0},
+        {"identity_confirmation_confidence": 1.1},
+        {"identity_tentative_max_gap_seconds": 0.0},
+        {"identity_max_reassociation_gap_seconds": 0.0},
+        {"identity_max_speed_per_second": 0.0},
+        {"identity_duplicate_iou": 1.1},
+        {"identity_additional_min_position_span": 0.0},
+        {"identity_max_per_lane": 0},
+    ):
+        with pytest.raises(ValueError):
+            Settings(**values)
+
+    monkeypatch.setenv("SWIMTRACK_IDENTITY_CONFIRMATION_OBSERVATIONS", "4")
+    monkeypatch.setenv("SWIMTRACK_IDENTITY_CONFIRMATION_SECONDS", "0.3")
+    monkeypatch.setenv("SWIMTRACK_IDENTITY_MAX_PER_LANE", "3")
+
+    settings = Settings.from_env()
+
+    assert settings.identity_confirmation_observations == 4
+    assert settings.identity_confirmation_seconds == 0.3
+    assert settings.identity_max_per_lane == 3
 
 
 def test_weak_reactivation_configuration_is_validated_and_loaded_from_environment(monkeypatch) -> None:

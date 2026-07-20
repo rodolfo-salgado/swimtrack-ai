@@ -73,7 +73,18 @@ class BatchMetadata(BaseModel):
 
 
 class BoundingBox(BaseModel):
+    """A current-frame box with both raw tracking and canonical identity data.
+
+    ``id`` remains the legacy box identifier: it is the raw per-track ID when
+    ByteTrack has one and a negative identity-local fallback for detector-only
+    observations.  ``track_id`` makes the raw-tracker meaning explicit, while
+    ``identity_id`` is stable for the duration of the session even when
+    ByteTrack starts a new tracklet.
+    """
+
     id: int
+    track_id: int | None = Field(default=None, ge=1)
+    identity_id: int | None = Field(default=None, ge=1)
     lane_id: str | None = None
     x1: float
     y1: float
@@ -123,6 +134,7 @@ class LapEvidence(BaseModel):
 
 class LaneLapScore(BaseModel):
     lane_id: str
+    identity_id: int | None = Field(default=None, ge=1)
     track_id: int | None = None
     lap_score: float = Field(ge=0, le=1)
     no_lap_score: float | None = Field(default=None, ge=0, le=1)
@@ -138,12 +150,26 @@ class LaneLapScore(BaseModel):
     evidence: LapEvidence
 
 
+class IdentitySummary(BaseModel):
+    """Counts of canonical swimmer identities in one tracking session."""
+
+    confirmed_count: int = Field(ge=0)
+    active_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def active_is_subset_of_confirmed(self) -> IdentitySummary:
+        if self.active_count > self.confirmed_count:
+            raise ValueError("active_count must not exceed confirmed_count")
+        return self
+
+
 class FrameResult(BaseModel):
     frame_index: int
     time_ms: float
     width: int
     height: int
     boxes: list[BoundingBox]
+    identity_summary: IdentitySummary | None = None
     lap_scores: list[LaneLapScore] | None = None
     tracking_diagnostics: FrameTrackingDiagnostics | None = None
 

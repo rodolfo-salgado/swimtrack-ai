@@ -57,6 +57,20 @@ class Settings:
     far_crop_right: float = 0.7037037037
     far_crop_bottom: float = 0.5185185185
     far_crop_nms_threshold: float = 0.50
+    identity_confirmation_observations: int = 3
+    identity_confirmation_seconds: float = 0.20
+    identity_confirmation_confidence: float = 0.18
+    identity_tentative_max_gap_seconds: float = 0.75
+    identity_max_reassociation_gap_seconds: float = 12.0
+    identity_max_speed_per_second: float = 0.07
+    identity_position_slack: float = 0.08
+    identity_max_lane_x_delta: float = 0.22
+    identity_duplicate_iou: float = 0.45
+    identity_duplicate_position_delta: float = 0.08
+    identity_duplicate_lane_x_delta: float = 0.15
+    identity_additional_min_position_span: float = 0.10
+    identity_additional_cooccurrence_max_gap_seconds: float = 0.25
+    identity_max_per_lane: int = 2
     max_batch_frames: int = 8
     max_frame_bytes: int = 2_000_000
     max_batch_bytes: int = 12_000_000
@@ -107,6 +121,34 @@ class Settings:
             raise ValueError("far crop coordinates must define a non-empty normalized rectangle")
         if not 0.0 <= self.far_crop_nms_threshold <= 1.0:
             raise ValueError("far_crop_nms_threshold must be between zero and one")
+        if self.identity_confirmation_observations < 1:
+            raise ValueError("identity_confirmation_observations must be at least one")
+        if self.identity_confirmation_seconds < 0:
+            raise ValueError("identity_confirmation_seconds must not be negative")
+        if not 0.0 <= self.identity_confirmation_confidence <= 1.0:
+            raise ValueError("identity_confirmation_confidence must be between zero and one")
+        if self.identity_tentative_max_gap_seconds <= 0:
+            raise ValueError("identity_tentative_max_gap_seconds must be greater than zero")
+        if self.identity_max_reassociation_gap_seconds <= 0:
+            raise ValueError("identity_max_reassociation_gap_seconds must be greater than zero")
+        if self.identity_max_speed_per_second <= 0:
+            raise ValueError("identity_max_speed_per_second must be greater than zero")
+        if not 0.0 < self.identity_position_slack <= 1.0:
+            raise ValueError("identity_position_slack must be in (0, 1]")
+        if not 0.0 < self.identity_max_lane_x_delta <= 1.0:
+            raise ValueError("identity_max_lane_x_delta must be in (0, 1]")
+        if not 0.0 <= self.identity_duplicate_iou <= 1.0:
+            raise ValueError("identity_duplicate_iou must be between zero and one")
+        if not 0.0 < self.identity_duplicate_position_delta <= 1.0:
+            raise ValueError("identity_duplicate_position_delta must be in (0, 1]")
+        if not 0.0 < self.identity_duplicate_lane_x_delta <= 1.0:
+            raise ValueError("identity_duplicate_lane_x_delta must be in (0, 1]")
+        if not 0.0 < self.identity_additional_min_position_span <= 1.0:
+            raise ValueError("identity_additional_min_position_span must be in (0, 1]")
+        if self.identity_additional_cooccurrence_max_gap_seconds <= 0:
+            raise ValueError("identity_additional_cooccurrence_max_gap_seconds must be greater than zero")
+        if self.identity_max_per_lane < 1:
+            raise ValueError("identity_max_per_lane must be at least one")
         if self.trt_opt_batch_size > self.trt_max_batch_size:
             raise ValueError("trt_opt_batch_size must not exceed trt_max_batch_size")
         if self.video_decode_batch_frames > self.trt_max_batch_size:
@@ -151,6 +193,22 @@ class Settings:
             far_crop_right=_floating("FAR_CROP_RIGHT", 0.7037037037),
             far_crop_bottom=_floating("FAR_CROP_BOTTOM", 0.5185185185),
             far_crop_nms_threshold=_floating("FAR_CROP_NMS_THRESHOLD", 0.50),
+            identity_confirmation_observations=_integer("IDENTITY_CONFIRMATION_OBSERVATIONS", 3),
+            identity_confirmation_seconds=_floating("IDENTITY_CONFIRMATION_SECONDS", 0.20),
+            identity_confirmation_confidence=_floating("IDENTITY_CONFIRMATION_CONFIDENCE", 0.18),
+            identity_tentative_max_gap_seconds=_floating("IDENTITY_TENTATIVE_MAX_GAP_SECONDS", 0.75),
+            identity_max_reassociation_gap_seconds=_floating("IDENTITY_MAX_REASSOCIATION_GAP_SECONDS", 12.0),
+            identity_max_speed_per_second=_floating("IDENTITY_MAX_SPEED_PER_SECOND", 0.07),
+            identity_position_slack=_floating("IDENTITY_POSITION_SLACK", 0.08),
+            identity_max_lane_x_delta=_floating("IDENTITY_MAX_LANE_X_DELTA", 0.22),
+            identity_duplicate_iou=_floating("IDENTITY_DUPLICATE_IOU", 0.45),
+            identity_duplicate_position_delta=_floating("IDENTITY_DUPLICATE_POSITION_DELTA", 0.08),
+            identity_duplicate_lane_x_delta=_floating("IDENTITY_DUPLICATE_LANE_X_DELTA", 0.15),
+            identity_additional_min_position_span=_floating("IDENTITY_ADDITIONAL_MIN_POSITION_SPAN", 0.10),
+            identity_additional_cooccurrence_max_gap_seconds=_floating(
+                "IDENTITY_ADDITIONAL_COOCCURRENCE_MAX_GAP_SECONDS", 0.25
+            ),
+            identity_max_per_lane=_integer("IDENTITY_MAX_PER_LANE", 2),
             max_batch_frames=_integer("MAX_BATCH_FRAMES", 8),
             max_frame_bytes=_integer("MAX_FRAME_BYTES", 2_000_000),
             max_batch_bytes=_integer("MAX_BATCH_BYTES", 12_000_000),

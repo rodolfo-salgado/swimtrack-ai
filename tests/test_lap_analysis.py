@@ -244,3 +244,28 @@ def test_projection_uses_lane_as_identity_after_track_id_change() -> None:
     assert last.evaluable
     assert last.track_id == 19
     assert last.observation_quality > 0.85
+
+
+def test_two_canonical_identities_in_one_lane_keep_separate_histories() -> None:
+    analyzer = LapAnalyzer(fps=10.0, calibration_id=FIXED_CAMERA_CALIBRATION_ID)
+    latest = []
+    for index in range(30):
+        first_position = 0.25 + index * 0.01
+        second_position = 0.75 - index * 0.01
+        first = _box_at(first_position, track_id=3)
+        second = _box_at(second_position, track_id=19)
+        first = first.model_copy(update={"lane_id": "center", "identity_id": 1})
+        second = second.model_copy(update={"lane_id": "center", "identity_id": 2})
+        latest = analyzer.observe(
+            time_ms=index * 100.0,
+            width=1080,
+            height=1080,
+            boxes=[first, second],
+        )
+
+    by_identity = {result.identity_id: result for result in latest}
+    assert set(by_identity) == {1, 2}
+    assert by_identity[1].longitudinal_position == pytest.approx(0.54, abs=0.02)
+    assert by_identity[2].longitudinal_position == pytest.approx(0.46, abs=0.02)
+    assert by_identity[1].track_id == 3
+    assert by_identity[2].track_id == 19

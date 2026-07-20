@@ -133,15 +133,19 @@ def test_service_does_not_reactivate_a_lost_track_with_a_detection_used_by_bytet
     second = service.process_batch(session_id, _metadata(1), [frame], fingerprint="shared-1")
     third = service.process_batch(session_id, _metadata(2), [frame], fingerprint="shared-2")
 
-    first_ids = {box.id for box in first.frames[0].boxes}
+    first_diagnostics = first.frames[0].tracking_diagnostics
+    assert first_diagnostics is not None
+    first_ids = set(first_diagnostics.lanes[0].active_track_ids)
     assert len(first_ids) == 2
-    continuing_ids = {box.id for box in second.frames[0].boxes}
+    second_diagnostics = second.frames[0].tracking_diagnostics
+    assert second_diagnostics is not None
+    continuing_ids = set(second_diagnostics.lanes[0].active_track_ids)
     assert len(continuing_ids) == 1
     lost_id = next(iter(first_ids - continuing_ids))
-    assert {box.id for box in third.frames[0].boxes} == continuing_ids
-    assert lost_id not in {box.id for box in third.frames[0].boxes}
-    diagnostics = third.frames[0].tracking_diagnostics
-    assert diagnostics is not None
-    assert diagnostics.weak_candidates.count == 0
-    assert diagnostics.lanes[0].weak_candidates_after_roi.count == 0
-    assert diagnostics.lanes[0].weak_reactivated_track_ids == []
+    third_diagnostics = third.frames[0].tracking_diagnostics
+    assert third_diagnostics is not None
+    assert set(third_diagnostics.lanes[0].active_track_ids) == continuing_ids
+    assert lost_id not in third_diagnostics.lanes[0].active_track_ids
+    assert third_diagnostics.weak_candidates.count == 0
+    assert third_diagnostics.lanes[0].weak_candidates_after_roi.count == 0
+    assert third_diagnostics.lanes[0].weak_reactivated_track_ids == []

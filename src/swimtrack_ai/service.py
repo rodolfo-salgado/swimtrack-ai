@@ -14,6 +14,7 @@ from swimtrack_ai.calibration import LaneRouter
 from swimtrack_ai.config import Settings
 from swimtrack_ai.detectors import Detector, DetectorResult
 from swimtrack_ai.errors import ConflictError, SessionCapacityError, SessionNotFoundError
+from swimtrack_ai.identity import IdentityCandidate, IdentityResolver
 from swimtrack_ai.lap_analysis import LapAnalyzer
 from swimtrack_ai.schemas import (
     BatchMetadata,
@@ -24,6 +25,7 @@ from swimtrack_ai.schemas import (
     DiagnosticStage,
     FrameResult,
     FrameTrackingDiagnostics,
+    IdentitySummary,
     LaneTrackingDiagnostics,
     SessionCreated,
     TrackingConfiguration,
@@ -43,6 +45,7 @@ class SessionState:
     trackers: dict[str, Tracker]
     lane_router: LaneRouter
     lap_analyzer: LapAnalyzer | None
+    identity_resolver: IdentityResolver
     diagnostics_level: DiagnosticsLevel
     weak_reactivation_enabled: bool
     weak_reactivation_max_gap_frames: int
@@ -103,6 +106,25 @@ class TrackingService:
                 trackers={lane_id: self.tracker_factory(fps) for lane_id in lane_router.lane_ids},
                 lane_router=lane_router,
                 lap_analyzer=LapAnalyzer(fps, lap_calibration_id) if lap_calibration_id is not None else None,
+                identity_resolver=IdentityResolver(
+                    calibration_id=lap_calibration_id,
+                    confirmation_observations=self.settings.identity_confirmation_observations,
+                    confirmation_seconds=self.settings.identity_confirmation_seconds,
+                    confirmation_confidence=self.settings.identity_confirmation_confidence,
+                    tentative_max_gap_seconds=self.settings.identity_tentative_max_gap_seconds,
+                    max_reassociation_gap_seconds=self.settings.identity_max_reassociation_gap_seconds,
+                    max_speed_per_second=self.settings.identity_max_speed_per_second,
+                    position_slack=self.settings.identity_position_slack,
+                    max_lane_x_delta=self.settings.identity_max_lane_x_delta,
+                    duplicate_iou=self.settings.identity_duplicate_iou,
+                    duplicate_position_delta=self.settings.identity_duplicate_position_delta,
+                    duplicate_lane_x_delta=self.settings.identity_duplicate_lane_x_delta,
+                    additional_min_position_span=self.settings.identity_additional_min_position_span,
+                    additional_cooccurrence_max_gap_seconds=(
+                        self.settings.identity_additional_cooccurrence_max_gap_seconds
+                    ),
+                    max_per_lane=self.settings.identity_max_per_lane,
+                ),
                 diagnostics_level=diagnostics,
                 weak_reactivation_enabled=weak_reactivation_enabled,
                 weak_reactivation_max_gap_frames=weak_reactivation_max_gap_frames,
@@ -217,8 +239,7 @@ class TrackingService:
         """Apply the detection cap only after calibrated lane routing."""
 
         return {
-            lane_id: detections[: self.settings.max_detections]
-            for lane_id, detections in routed_detections.items()
+            lane_id: detections[: self.settings.max_detections] for lane_id, detections in routed_detections.items()
         }
 
     def _infer_detector_batch(
@@ -236,9 +257,7 @@ class TrackingService:
         else:
             results = [self.detector.infer(frame, target_size) for frame, target_size in zip(frames, target_sizes)]
         if len(results) != len(frames):
-            raise RuntimeError(
-                f"Detector returned {len(results)} results for {len(frames)} input views"
-            )
+            raise RuntimeError(f"Detector returned {len(results)} results for {len(frames)} input views")
         return results
 
     def _far_crop_view(
@@ -365,6 +384,131 @@ class TrackingService:
                 max_center_distance=self.settings.weak_reactivation_max_center_distance,
             )
         return tracker.update(detections, image_size)
+
+    @staticmethod
+    def _clamped_box(
+        *,
+        track_id: int | None,
+        lane_id: str,
+        coordinates: np.ndarray,
+        width: int,
+        height: int,
+        confidence: float,
+    ) -> BoundingBox:
+        x1, y1, x2, y2 = np.asarray(coordinates, dtype=float)
+        return BoundingBox(
+            # ``-1`` is the established fallback sentinel for a detection that
+            # has not been assigned a ByteTrack tracklet yet.
+            id=track_id if track_id is not None else -1,
+            track_id=track_id,
+            lane_id=None if lane_id == "global" else lane_id,
+            x1=max(0.0, min(float(x1), width - 1)),
+            y1=max(0.0, min(float(y1), height - 1)),
+            x2=max(0.0, min(float(x2), width - 1)),
+            y2=max(0.0, min(float(y2), height - 1)),
+            conf=float(confidence),
+        )
+
+    @staticmethod
+    def _box_iou(left: BoundingBox, right: BoundingBox) -> float:
+        intersection_width = max(0.0, min(left.x2, right.x2) - max(left.x1, right.x1))
+        intersection_height = max(0.0, min(left.y2, right.y2) - max(left.y1, right.y1))
+        intersection = intersection_width * intersection_height
+        left_area = max(0.0, left.x2 - left.x1) * max(0.0, left.y2 - left.y1)
+        right_area = max(0.0, right.x2 - right.x1) * max(0.0, right.y2 - right.y1)
+        union = left_area + right_area - intersection
+        return intersection / union if union > 0 else 0.0
+
+    def _identity_candidates(
+        self,
+        tracker_updates: dict[str, TrackerUpdate],
+        routed_detections: dict[str, np.ndarray],
+        image_size: tuple[int, int],
+    ) -> list[IdentityCandidate]:
+        """Combine post-ROI detections with active ByteTrack observations.
+
+        A detector observation is retained even if it has no active ByteTrack
+        track.  This is necessary for two swimmers in one lane: a distant swimmer
+        can remain visible below ByteTrack's track-init threshold.
+        """
+
+        width, height = image_size
+        result: list[IdentityCandidate] = []
+        for lane_id, detections in routed_detections.items():
+            active_boxes = [
+                self._clamped_box(
+                    track_id=int(track.track_id),
+                    lane_id=lane_id,
+                    coordinates=np.asarray(track.tlbr, dtype=float),
+                    width=width,
+                    height=height,
+                    confidence=float(track.score),
+                )
+                for track in tracker_updates[lane_id].active_tracks
+            ]
+            matched_track_ids: set[int] = set()
+            for detection in detections:
+                x1, y1, x2, y2, confidence = np.asarray(detection, dtype=float)
+                detector_box = self._clamped_box(
+                    track_id=None,
+                    lane_id=lane_id,
+                    coordinates=np.asarray((x1, y1, x2, y2), dtype=float),
+                    width=width,
+                    height=height,
+                    confidence=float(confidence),
+                )
+                overlap, active_box = max(
+                    ((self._box_iou(detector_box, box), box) for box in active_boxes),
+                    default=(0.0, None),
+                    key=lambda item: item[0],
+                )
+                track_id = active_box.track_id if active_box is not None and overlap >= 0.30 else None
+                if track_id is not None:
+                    detector_box = detector_box.model_copy(update={"id": track_id, "track_id": track_id})
+                    matched_track_ids.add(track_id)
+                result.append(
+                    IdentityCandidate(
+                        lane_id=lane_id,
+                        box=detector_box,
+                        track_id=track_id,
+                        source="detection",
+                    )
+                )
+            for active_box in active_boxes:
+                if active_box.track_id in matched_track_ids:
+                    continue
+                result.append(
+                    IdentityCandidate(
+                        lane_id=lane_id,
+                        box=active_box,
+                        track_id=active_box.track_id,
+                        source="track",
+                    )
+                )
+        return result
+
+    @staticmethod
+    def _resolved_identity_boxes(resolution) -> list[BoundingBox]:
+        boxes = []
+        for assignment in resolution.assignments:
+            box = assignment.candidate.box
+            # A detector-only observation used to share the ``-1`` sentinel
+            # with every other untracked box.  That makes two real swimmers
+            # indistinguishable to legacy consumers which key their overlays by
+            # ``id``.  Keep the raw ByteTrack ID whenever it exists and use a
+            # stable, negative session-local fallback otherwise.  ``track_id``
+            # remains the unambiguous indication of whether ByteTrack produced
+            # a tracklet for this observation.
+            legacy_id = box.track_id if box.track_id is not None else -assignment.identity_id
+            boxes.append(
+                box.model_copy(
+                    update={
+                        "id": legacy_id,
+                        "identity_id": assignment.identity_id,
+                    }
+                )
+            )
+        return sorted(boxes, key=lambda box: (box.identity_id or 0, box.id))
 
     @staticmethod
     def _lap_analysis_boxes(
@@ -508,22 +652,17 @@ class TrackingService:
                         )
                         for lane_id, detections in routed_detections.items()
                     }
-                    boxes = []
-                    for lane_id, tracker_update in tracker_updates.items():
-                        for track in tracker_update.active_tracks:
-                            x1, y1, x2, y2 = np.asarray(track.tlbr, dtype=float)
-                            boxes.append(
-                                BoundingBox(
-                                    id=int(track.track_id),
-                                    lane_id=None if lane_id == "global" else lane_id,
-                                    x1=max(0.0, min(float(x1), item.original_width - 1)),
-                                    y1=max(0.0, min(float(y1), item.original_height - 1)),
-                                    x2=max(0.0, min(float(x2), item.original_width - 1)),
-                                    y2=max(0.0, min(float(y2), item.original_height - 1)),
-                                    conf=float(track.score),
-                                )
-                            )
-                    lap_analysis_boxes = self._lap_analysis_boxes(boxes, routed_detections, image_size)
+                    identity_resolution = state.identity_resolver.resolve(
+                        time_ms=item.time_ms,
+                        width=item.original_width,
+                        height=item.original_height,
+                        candidates=self._identity_candidates(
+                            tracker_updates,
+                            routed_detections,
+                            image_size,
+                        ),
+                    )
+                    boxes = self._resolved_identity_boxes(identity_resolution)
                     frame_results.append(
                         FrameResult(
                             frame_index=item.frame_index,
@@ -531,12 +670,16 @@ class TrackingService:
                             width=item.original_width,
                             height=item.original_height,
                             boxes=boxes,
+                            identity_summary=IdentitySummary(
+                                confirmed_count=identity_resolution.confirmed_count,
+                                active_count=identity_resolution.active_count,
+                            ),
                             lap_scores=(
                                 state.lap_analyzer.observe(
                                     time_ms=item.time_ms,
                                     width=item.original_width,
                                     height=item.original_height,
-                                    boxes=lap_analysis_boxes,
+                                    boxes=boxes,
                                 )
                                 if state.lap_analyzer is not None
                                 else None

@@ -169,11 +169,13 @@ Los frames transportados pueden estar redimensionados a 640×640. `original_widt
       "width": 1920,
       "height": 1080,
       "boxes": [
-        {"id":3,"x1":417.2,"y1":201.8,"x2":722.1,"y2":811.0,"conf":0.94,"class_id":0}
+        {"id":3,"track_id":3,"identity_id":1,"lane_id":"center","x1":417.2,"y1":201.8,"x2":722.1,"y2":811.0,"conf":0.94,"class_id":0}
       ],
+      "identity_summary": {"confirmed_count":1,"active_count":1},
       "lap_scores": [
         {
           "lane_id": "center",
+          "identity_id": 1,
           "track_id": 3,
           "lap_score": 0.82,
           "no_lap_score": 0.18,
@@ -194,7 +196,9 @@ Los frames transportados pueden estar redimensionados a 640×640. `original_widt
 }
 ```
 
-`lap_score` y `no_lap_score` son scores heurísticos continuos, no probabilidades calibradas ni un conteo definitivo. El score combina cercanía a la pared, aproximación, reversión, salida y calidad local de tracking. `trajectory-v4` sólo habilita candidatos después de observar al nadador dentro de la zona interior del carril; así una salida que comienza junto a la pared no se confunde con una vuelta. Cuando ByteTrack no mantiene un track, el análisis usa las detecciones de la ROI del carril y puede unir ambos lados de una oclusión de hasta 6 segundos, reduciendo la confianza según la duración del gap. `candidate_episode_id` identifica una visita completa a la pared y agrupa todos sus candidatos, mientras que `candidate_time_ms` conserva el instante estimado de contacto. Si falta suficiente trayectoria, `evaluable` es `false` y `no_lap_score` se omite para no convertir ausencia de observación en evidencia de `no_lap`.
+`track_id` es el ID efímero emitido por ByteTrack cuando existe; `identity_id` es la identidad canónica, estable durante la sesión aunque cambie el tracklet. Para una observación sólo de detector, `track_id` se omite y `id` usa una clave negativa estable de compatibilidad. `identity_summary.confirmed_count` es el número acumulado de personas físicas confirmadas y `active_count` las confirmadas visibles en ese frame. La asociación usa detecciones post-ROI además de tracks activos, deduplica observaciones y admite hasta dos nadadores por carril por default.
+
+`lap_score` y `no_lap_score` son scores heurísticos continuos, no probabilidades calibradas ni un conteo definitivo. El score combina cercanía a la pared, aproximación, reversión, salida y calidad local de tracking. `trajectory-v5` sólo habilita candidatos después de observar al nadador dentro de la zona interior del carril; así una salida que comienza junto a la pared no se confunde con una vuelta. Cuando ByteTrack no mantiene un track, el análisis usa las detecciones de la ROI del carril y puede unir ambos lados de una oclusión de hasta 6 segundos, reduciendo la confianza según la duración del gap. Cada identidad canónica mantiene su propia trayectoria y sus propios `candidate_episode_id`, por lo que dos nadadores del mismo carril no mezclan largos. Si falta suficiente trayectoria, `evaluable` es `false` y `no_lap_score` se omite para no convertir ausencia de observación en evidencia de `no_lap`.
 
 Las respuestas `200` incluyen los headers `X-Swimtrack-Decode-Ms`, `X-Swimtrack-Process-Ms` y `X-Swimtrack-Total-Ms`. Miden, respectivamente, la lectura/decodificación multipart, el procesamiento serializado de la sesión (inference y tracking) y el total de la ruta; el Front los registra por batch sin alterar el JSON del contrato.
 

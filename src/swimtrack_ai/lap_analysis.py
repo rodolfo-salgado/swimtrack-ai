@@ -33,6 +33,7 @@ class _Observation:
 class _LaneRuntime:
     calibration: LaneCalibration
     image_to_lane: np.ndarray
+    identity_id: int | None
     history: deque[_Observation] = field(default_factory=deque)
     armed_since_ms: float | None = None
     episodes: deque[_WallEpisode] = field(default_factory=deque)
@@ -114,12 +115,14 @@ class LapAnalyzer:
 
     def __init__(self, fps: float, calibration_id: str) -> None:
         self.fps = fps
-        self._lanes = {
-            calibration.lane_id: _LaneRuntime(
+        self._calibrations = {calibration.lane_id: calibration for calibration in lanes_for_calibration(calibration_id)}
+        self._lanes: dict[tuple[str, int | None], _LaneRuntime] = {
+            (lane_id, None): _LaneRuntime(
                 calibration=calibration,
                 image_to_lane=perspective_matrix(calibration),
+                identity_id=None,
             )
-            for calibration in lanes_for_calibration(calibration_id)
+            for lane_id, calibration in self._calibrations.items()
         }
 
     def observe(
@@ -130,11 +133,36 @@ class LapAnalyzer:
         height: int,
         boxes: list[BoundingBox],
     ) -> list[LaneLapScore]:
+        boxes_by_identity: dict[tuple[str, int | None], list[BoundingBox]] = {}
+        for box in boxes:
+            lane_id = box.lane_id
+            if lane_id is None and len(self._calibrations) == 1:
+                lane_id = next(iter(self._calibrations))
+            if lane_id not in self._calibrations:
+                continue
+            boxes_by_identity.setdefault((lane_id, box.identity_id), []).append(box)
+        for lane_id, identity_id in boxes_by_identity:
+            self._runtime(lane_id, identity_id)
+
+        runtime_keys = self._lanes
+        if any(identity_id is not None for _, identity_id in self._lanes):
+            runtime_keys = {key: runtime for key, runtime in self._lanes.items() if key[1] is not None}
+
         results: list[LaneLapScore] = []
-        for runtime in self._lanes.values():
+        for key in sorted(
+            runtime_keys,
+            key=lambda item: (item[0], -1 if item[1] is None else item[1]),
+        ):
+            runtime = self._lanes[key]
             if runtime.history and time_ms < runtime.history[-1].time_ms:
                 raise ValueError("Lap observations must not move backwards in time")
-            observation = self._select_observation(runtime, time_ms, width, height, boxes)
+            observation = self._select_observation(
+                runtime,
+                time_ms,
+                width,
+                height,
+                boxes_by_identity.get(key, []),
+            )
             runtime.history.append(observation)
             self._update_wall_episode(runtime, observation)
             cutoff = time_ms - self.history_ms
@@ -144,6 +172,20 @@ class LapAnalyzer:
                 runtime.episodes.popleft()
             results.append(self._score(runtime, observation))
         return results
+
+    def _runtime(self, lane_id: str, identity_id: int | None) -> _LaneRuntime:
+        key = (lane_id, identity_id)
+        runtime = self._lanes.get(key)
+        if runtime is not None:
+            return runtime
+        calibration = self._calibrations[lane_id]
+        runtime = _LaneRuntime(
+            calibration=calibration,
+            image_to_lane=perspective_matrix(calibration),
+            identity_id=identity_id,
+        )
+        self._lanes[key] = runtime
+        return runtime
 
     def _update_wall_episode(self, runtime: _LaneRuntime, observation: _Observation) -> None:
         if observation.position is None:
@@ -204,7 +246,12 @@ class LapAnalyzer:
                     if recent_observation is not None and recent_observation.position is not None
                     else 0.0
                 )
-                if box.id <= 0 and recent_observation is not None:
+                # ``id`` is a legacy rendering key and may be a negative,
+                # identity-local fallback for a detector-only observation.
+                # Prefer the explicit raw track field, retaining support for
+                # older direct callers that only supplied a positive ``id``.
+                has_raw_track = box.track_id is not None or box.id > 0
+                if not has_raw_track and recent_observation is not None:
                     elapsed_seconds = max(0.0, time_ms - recent_observation.time_ms) / 1000.0
                     allowed_jump = min(
                         self.raw_max_position_jump,
@@ -224,7 +271,7 @@ class LapAnalyzer:
             time_ms=time_ms,
             position=_clip01(position),
             confidence=_clip01(box.conf),
-            track_id=box.id if box.id > 0 else None,
+            track_id=box.track_id if box.track_id is not None else (box.id if box.id > 0 else None),
         )
 
     def _score(self, runtime: _LaneRuntime, current: _Observation) -> LaneLapScore:
@@ -253,6 +300,7 @@ class LapAnalyzer:
         )
         return LaneLapScore(
             lane_id=runtime.calibration.lane_id,
+            identity_id=runtime.identity_id,
             track_id=best.track_id if best is not None else current.track_id,
             lap_score=_clip01(lap_score),
             no_lap_score=_clip01(no_lap_score) if no_lap_score is not None else None,
