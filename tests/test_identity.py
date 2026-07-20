@@ -123,6 +123,7 @@ def test_two_swimmers_in_one_lane_are_kept_distinct() -> None:
 
     assert {assignment.identity_id for assignment in first.assignments} == {1, 2}
     assert {assignment.identity_id for assignment in second.assignments} == {1, 2}
+    assert {assignment.swimmer_id for assignment in second.assignments} == {1, 2}
     assert second.confirmed_count == 2
     assert second.active_count == 2
 
@@ -383,6 +384,40 @@ def test_crossing_with_raw_id_churn_preserves_the_two_trajectories() -> None:
         88: 2,
     }
     assert after.confirmed_count == 2
+
+
+def test_raw_track_id_swap_cannot_override_two_swimmer_trajectories() -> None:
+    resolver = _resolver()
+    _resolve(
+        resolver,
+        0.0,
+        [
+            _candidate(10, lane_x=0.25, position=0.20),
+            _candidate(20, lane_x=0.75, position=0.80),
+        ],
+    )
+    _resolve(
+        resolver,
+        1_000.0,
+        [
+            _candidate(10, lane_x=0.25, position=0.30),
+            _candidate(20, lane_x=0.75, position=0.70),
+        ],
+    )
+
+    after_swap = _resolve(
+        resolver,
+        2_000.0,
+        [
+            _candidate(20, lane_x=0.25, position=0.40),
+            _candidate(10, lane_x=0.75, position=0.60),
+        ],
+    )
+
+    assert {assignment.candidate.track_id: assignment.identity_id for assignment in after_swap.assignments} == {
+        20: 1,
+        10: 2,
+    }
 
 
 def test_long_detector_gap_reacquires_the_only_swimmer_without_new_identity() -> None:

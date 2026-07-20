@@ -530,6 +530,7 @@ class TrackingService:
                     update={
                         "id": legacy_id,
                         "identity_id": assignment.identity_id,
+                        "swimmer_id": assignment.swimmer_id,
                     }
                 )
             )

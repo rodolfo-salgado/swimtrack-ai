@@ -9,7 +9,7 @@ low-confidence swimmers can be visible while ByteTrack has no active track.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -36,6 +36,7 @@ class ResolvedIdentity:
     candidate: IdentityCandidate
     identity_id: int
     confirmed: bool
+    swimmer_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +78,7 @@ class _Identity:
     last_cooccurrence_ms: float | None = None
     cooccurrence_minimum_position: float | None = None
     cooccurrence_maximum_position: float | None = None
-    track_ids: set[int] = field(default_factory=set)
+    swimmer_id: int | None = None
 
     def __post_init__(self) -> None:
         self.confidence_sum = float(self.box.conf)
@@ -153,6 +154,7 @@ class IdentityResolver:
         )
         self._identities: dict[str, list[_Identity]] = {}
         self._next_identity_id = 1
+        self._next_swimmer_id = 1
 
     def resolve(
         self,
@@ -303,6 +305,7 @@ class IdentityResolver:
                     candidate=candidate.candidate,
                     identity_id=identity.identity_id,
                     confirmed=identity.confirmed,
+                    swimmer_id=identity.swimmer_id,
                 )
             )
         return result
@@ -349,8 +352,6 @@ class IdentityResolver:
         candidate: _ProjectedCandidate,
         time_ms: float,
     ) -> float | None:
-        if candidate.candidate.track_id is not None and candidate.candidate.track_id in identity.track_ids:
-            return 0.0
         elapsed_seconds = max(0.0, time_ms - identity.last_seen_ms) / 1000.0
         if elapsed_seconds > self.max_reassociation_gap_seconds:
             return None
@@ -370,14 +371,12 @@ class IdentityResolver:
             * (candidate.candidate.box.y2 - candidate.candidate.box.y1),
         )
         scale_cost = min(1.0, abs(np.log(candidate_area / identity_area)))
-        raw_track_bonus = 0.06 if candidate.candidate.track_id == identity.box.track_id else 0.0
         return max(
             0.0,
             0.62 * position_error / max(allowed_position_error, 1e-6)
             + 0.18 * lane_x_error / max(allowed_lane_x_error, 1e-6)
             + 0.10 * iou_cost
             + 0.05 * scale_cost
-            - raw_track_bonus,
         )
 
     def _new_identity(
@@ -398,8 +397,6 @@ class IdentityResolver:
             box=candidate.candidate.box,
             requires_cooccurrence=requires_cooccurrence,
         )
-        if candidate.candidate.track_id is not None:
-            identity.track_ids.add(candidate.candidate.track_id)
         self._next_identity_id += 1
         return identity
 
@@ -426,8 +423,6 @@ class IdentityResolver:
         identity.box = candidate.candidate.box
         identity.observations += 1
         identity.confidence_sum += float(candidate.candidate.box.conf)
-        if candidate.candidate.track_id is not None:
-            identity.track_ids.add(candidate.candidate.track_id)
 
     def _promote_if_ready(self, identity: _Identity, time_ms: float) -> None:
         elapsed_seconds = (time_ms - identity.first_seen_ms) / 1000.0
@@ -456,8 +451,10 @@ class IdentityResolver:
                     >= self.additional_min_position_span
                 )
             )
-        ):
+        ) and not identity.confirmed:
             identity.confirmed = True
+            identity.swimmer_id = self._next_swimmer_id
+            self._next_swimmer_id += 1
 
     def _expire_tentative(self, identities: list[_Identity], time_ms: float) -> None:
         identities[:] = [

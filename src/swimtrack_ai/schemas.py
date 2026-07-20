@@ -79,12 +79,14 @@ class BoundingBox(BaseModel):
     ByteTrack has one and a negative identity-local fallback for detector-only
     observations.  ``track_id`` makes the raw-tracker meaning explicit, while
     ``identity_id`` is stable for the duration of the session even when
-    ByteTrack starts a new tracklet.
+    ByteTrack starts a new tracklet. ``swimmer_id`` is a compact presentation
+    ordinal assigned only after the canonical identity is confirmed.
     """
 
     id: int
     track_id: int | None = Field(default=None, ge=1)
     identity_id: int | None = Field(default=None, ge=1)
+    swimmer_id: int | None = Field(default=None, ge=1)
     lane_id: str | None = None
     x1: float
     y1: float
