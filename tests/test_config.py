@@ -31,6 +31,9 @@ IDENTITY_ENV_NAMES = (
     "IDENTITY_DUPLICATE_IOU",
     "IDENTITY_DUPLICATE_POSITION_DELTA",
     "IDENTITY_DUPLICATE_LANE_X_DELTA",
+    "IDENTITY_ADDITIONAL_CONFIRMATION_OBSERVATIONS",
+    "IDENTITY_ADDITIONAL_CONFIRMATION_SECONDS",
+    "IDENTITY_ADDITIONAL_CONFIRMATION_CONFIDENCE",
     "IDENTITY_ADDITIONAL_MIN_POSITION_SPAN",
     "IDENTITY_ADDITIONAL_COOCCURRENCE_MAX_GAP_SECONDS",
     "IDENTITY_MAX_PER_LANE",
@@ -74,6 +77,10 @@ def test_identity_configuration_has_conservative_defaults_and_is_validated(monke
         assert settings.identity_confirmation_observations == 3
         assert settings.identity_confirmation_seconds == 0.20
         assert settings.identity_confirmation_confidence == 0.18
+        assert settings.identity_additional_confirmation_observations == 8
+        assert settings.identity_additional_confirmation_seconds == 0.50
+        assert settings.identity_additional_confirmation_confidence == 0.30
+        assert settings.identity_additional_min_position_span == 0.15
         assert settings.identity_tentative_max_gap_seconds == 0.75
         assert settings.identity_max_reassociation_gap_seconds == 12.0
         assert settings.identity_max_per_lane == 2
@@ -85,6 +92,9 @@ def test_identity_configuration_has_conservative_defaults_and_is_validated(monke
         {"identity_max_reassociation_gap_seconds": 0.0},
         {"identity_max_speed_per_second": 0.0},
         {"identity_duplicate_iou": 1.1},
+        {"identity_additional_confirmation_observations": 0},
+        {"identity_additional_confirmation_seconds": -0.1},
+        {"identity_additional_confirmation_confidence": 1.1},
         {"identity_additional_min_position_span": 0.0},
         {"identity_max_per_lane": 0},
     ):
@@ -93,12 +103,18 @@ def test_identity_configuration_has_conservative_defaults_and_is_validated(monke
 
     monkeypatch.setenv("SWIMTRACK_IDENTITY_CONFIRMATION_OBSERVATIONS", "4")
     monkeypatch.setenv("SWIMTRACK_IDENTITY_CONFIRMATION_SECONDS", "0.3")
+    monkeypatch.setenv("SWIMTRACK_IDENTITY_ADDITIONAL_CONFIRMATION_OBSERVATIONS", "9")
+    monkeypatch.setenv("SWIMTRACK_IDENTITY_ADDITIONAL_CONFIRMATION_SECONDS", "0.6")
+    monkeypatch.setenv("SWIMTRACK_IDENTITY_ADDITIONAL_CONFIRMATION_CONFIDENCE", "0.35")
     monkeypatch.setenv("SWIMTRACK_IDENTITY_MAX_PER_LANE", "3")
 
     settings = Settings.from_env()
 
     assert settings.identity_confirmation_observations == 4
     assert settings.identity_confirmation_seconds == 0.3
+    assert settings.identity_additional_confirmation_observations == 9
+    assert settings.identity_additional_confirmation_seconds == 0.6
+    assert settings.identity_additional_confirmation_confidence == 0.35
     assert settings.identity_max_per_lane == 3
 
 

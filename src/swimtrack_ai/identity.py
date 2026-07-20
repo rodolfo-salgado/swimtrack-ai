@@ -72,6 +72,7 @@ class _Identity:
     confirmed: bool = False
     requires_cooccurrence: bool = False
     cooccurrence_observations: int = 0
+    cooccurrence_confidence_sum: float = 0.0
     first_cooccurrence_ms: float | None = None
     last_cooccurrence_ms: float | None = None
     cooccurrence_minimum_position: float | None = None
@@ -118,6 +119,9 @@ class IdentityResolver:
         duplicate_iou: float,
         duplicate_position_delta: float,
         duplicate_lane_x_delta: float,
+        additional_confirmation_observations: int,
+        additional_confirmation_seconds: float,
+        additional_confirmation_confidence: float,
         additional_min_position_span: float,
         additional_cooccurrence_max_gap_seconds: float,
         max_per_lane: int,
@@ -133,6 +137,9 @@ class IdentityResolver:
         self.duplicate_iou = duplicate_iou
         self.duplicate_position_delta = duplicate_position_delta
         self.duplicate_lane_x_delta = duplicate_lane_x_delta
+        self.additional_confirmation_observations = additional_confirmation_observations
+        self.additional_confirmation_seconds = additional_confirmation_seconds
+        self.additional_confirmation_confidence = additional_confirmation_confidence
         self.additional_min_position_span = additional_min_position_span
         self.additional_cooccurrence_max_gap_seconds = additional_cooccurrence_max_gap_seconds
         self.max_per_lane = max_per_lane
@@ -278,31 +285,14 @@ class IdentityResolver:
             assigned[candidate_index] = identity
 
         active_confirmed = any(identity.confirmed for identity in assigned.values())
-        for identity in assigned.values():
+        for candidate_index, identity in assigned.items():
+            candidate = candidates[candidate_index]
             if identity.requires_cooccurrence and not identity.confirmed and active_confirmed:
-                if (
-                    identity.last_cooccurrence_ms is None
-                    or (time_ms - identity.last_cooccurrence_ms) / 1000.0 > self.additional_cooccurrence_max_gap_seconds
-                ):
-                    identity.first_cooccurrence_ms = time_ms
-                    identity.cooccurrence_observations = 0
-                    identity.cooccurrence_minimum_position = identity.position
-                    identity.cooccurrence_maximum_position = identity.position
-                identity.cooccurrence_observations += 1
-                identity.last_cooccurrence_ms = time_ms
-                identity.cooccurrence_minimum_position = min(
-                    identity.cooccurrence_minimum_position
-                    if identity.cooccurrence_minimum_position is not None
-                    else identity.position,
-                    identity.position,
-                )
-                identity.cooccurrence_maximum_position = max(
-                    identity.cooccurrence_maximum_position
-                    if identity.cooccurrence_maximum_position is not None
-                    else identity.position,
-                    identity.position,
-                )
-            self._promote_if_ready(identity, time_ms)
+                self._record_cooccurrence(identity, candidate, time_ms)
+            # A tracker prediction can maintain an established identity, but it
+            # is not sufficient evidence to create a new physical swimmer.
+            if not identity.requires_cooccurrence or identity.confirmed or candidate.candidate.source == "detection":
+                self._promote_if_ready(identity, time_ms)
 
         result: list[ResolvedIdentity] = []
         for candidate_index in sorted(matched_candidates):
@@ -316,6 +306,42 @@ class IdentityResolver:
                 )
             )
         return result
+
+    def _record_cooccurrence(
+        self,
+        identity: _Identity,
+        candidate: _ProjectedCandidate,
+        time_ms: float,
+    ) -> None:
+        if (
+            identity.last_cooccurrence_ms is None
+            or (time_ms - identity.last_cooccurrence_ms) / 1000.0 > self.additional_cooccurrence_max_gap_seconds
+        ):
+            identity.first_cooccurrence_ms = None
+            identity.last_cooccurrence_ms = None
+            identity.cooccurrence_observations = 0
+            identity.cooccurrence_confidence_sum = 0.0
+            identity.cooccurrence_minimum_position = None
+            identity.cooccurrence_maximum_position = None
+        if candidate.candidate.source != "detection":
+            return
+        if identity.first_cooccurrence_ms is None:
+            identity.first_cooccurrence_ms = time_ms
+        identity.cooccurrence_observations += 1
+        identity.cooccurrence_confidence_sum += float(candidate.candidate.box.conf)
+        identity.last_cooccurrence_ms = time_ms
+        identity.cooccurrence_minimum_position = min(
+            identity.cooccurrence_minimum_position
+            if identity.cooccurrence_minimum_position is not None
+            else identity.position,
+            identity.position,
+        )
+        identity.cooccurrence_maximum_position = max(
+            identity.cooccurrence_maximum_position
+            if identity.cooccurrence_maximum_position is not None
+            else identity.position,
+            identity.position,
+        )
 
     def _matching_cost(
         self,
@@ -409,6 +435,11 @@ class IdentityResolver:
         cooccurrence_elapsed_seconds = (
             (time_ms - identity.first_cooccurrence_ms) / 1000.0 if identity.first_cooccurrence_ms is not None else 0.0
         )
+        cooccurrence_mean_confidence = (
+            identity.cooccurrence_confidence_sum / identity.cooccurrence_observations
+            if identity.cooccurrence_observations
+            else 0.0
+        )
         if (
             identity.observations >= self.confirmation_observations
             and elapsed_seconds >= self.confirmation_seconds
@@ -416,8 +447,9 @@ class IdentityResolver:
             and (
                 not identity.requires_cooccurrence
                 or (
-                    identity.cooccurrence_observations >= self.confirmation_observations
-                    and cooccurrence_elapsed_seconds >= self.confirmation_seconds
+                    identity.cooccurrence_observations >= self.additional_confirmation_observations
+                    and cooccurrence_elapsed_seconds >= self.additional_confirmation_seconds
+                    and cooccurrence_mean_confidence >= self.additional_confirmation_confidence
                     and identity.cooccurrence_minimum_position is not None
                     and identity.cooccurrence_maximum_position is not None
                     and identity.cooccurrence_maximum_position - identity.cooccurrence_minimum_position

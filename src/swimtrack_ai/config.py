@@ -68,7 +68,10 @@ class Settings:
     identity_duplicate_iou: float = 0.45
     identity_duplicate_position_delta: float = 0.08
     identity_duplicate_lane_x_delta: float = 0.15
-    identity_additional_min_position_span: float = 0.10
+    identity_additional_confirmation_observations: int = 8
+    identity_additional_confirmation_seconds: float = 0.50
+    identity_additional_confirmation_confidence: float = 0.30
+    identity_additional_min_position_span: float = 0.15
     identity_additional_cooccurrence_max_gap_seconds: float = 0.25
     identity_max_per_lane: int = 2
     max_batch_frames: int = 8
@@ -143,6 +146,12 @@ class Settings:
             raise ValueError("identity_duplicate_position_delta must be in (0, 1]")
         if not 0.0 < self.identity_duplicate_lane_x_delta <= 1.0:
             raise ValueError("identity_duplicate_lane_x_delta must be in (0, 1]")
+        if self.identity_additional_confirmation_observations < 1:
+            raise ValueError("identity_additional_confirmation_observations must be at least one")
+        if self.identity_additional_confirmation_seconds < 0:
+            raise ValueError("identity_additional_confirmation_seconds must not be negative")
+        if not 0.0 <= self.identity_additional_confirmation_confidence <= 1.0:
+            raise ValueError("identity_additional_confirmation_confidence must be between zero and one")
         if not 0.0 < self.identity_additional_min_position_span <= 1.0:
             raise ValueError("identity_additional_min_position_span must be in (0, 1]")
         if self.identity_additional_cooccurrence_max_gap_seconds <= 0:
@@ -204,7 +213,10 @@ class Settings:
             identity_duplicate_iou=_floating("IDENTITY_DUPLICATE_IOU", 0.45),
             identity_duplicate_position_delta=_floating("IDENTITY_DUPLICATE_POSITION_DELTA", 0.08),
             identity_duplicate_lane_x_delta=_floating("IDENTITY_DUPLICATE_LANE_X_DELTA", 0.15),
-            identity_additional_min_position_span=_floating("IDENTITY_ADDITIONAL_MIN_POSITION_SPAN", 0.10),
+            identity_additional_confirmation_observations=_integer("IDENTITY_ADDITIONAL_CONFIRMATION_OBSERVATIONS", 8),
+            identity_additional_confirmation_seconds=_floating("IDENTITY_ADDITIONAL_CONFIRMATION_SECONDS", 0.50),
+            identity_additional_confirmation_confidence=_floating("IDENTITY_ADDITIONAL_CONFIRMATION_CONFIDENCE", 0.30),
+            identity_additional_min_position_span=_floating("IDENTITY_ADDITIONAL_MIN_POSITION_SPAN", 0.15),
             identity_additional_cooccurrence_max_gap_seconds=_floating(
                 "IDENTITY_ADDITIONAL_COOCCURRENCE_MAX_GAP_SECONDS", 0.25
             ),

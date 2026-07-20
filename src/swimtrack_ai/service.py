@@ -119,6 +119,9 @@ class TrackingService:
                     duplicate_iou=self.settings.identity_duplicate_iou,
                     duplicate_position_delta=self.settings.identity_duplicate_position_delta,
                     duplicate_lane_x_delta=self.settings.identity_duplicate_lane_x_delta,
+                    additional_confirmation_observations=(self.settings.identity_additional_confirmation_observations),
+                    additional_confirmation_seconds=self.settings.identity_additional_confirmation_seconds,
+                    additional_confirmation_confidence=(self.settings.identity_additional_confirmation_confidence),
                     additional_min_position_span=self.settings.identity_additional_min_position_span,
                     additional_cooccurrence_max_gap_seconds=(
                         self.settings.identity_additional_cooccurrence_max_gap_seconds
@@ -446,26 +449,42 @@ class TrackingService:
                 )
                 for track in tracker_updates[lane_id].active_tracks
             ]
-            matched_track_ids: set[int] = set()
-            for detection in detections:
-                x1, y1, x2, y2, confidence = np.asarray(detection, dtype=float)
-                detector_box = self._clamped_box(
+            detector_boxes = [
+                self._clamped_box(
                     track_id=None,
                     lane_id=lane_id,
-                    coordinates=np.asarray((x1, y1, x2, y2), dtype=float),
+                    coordinates=np.asarray(detection[:4], dtype=float),
                     width=width,
                     height=height,
-                    confidence=float(confidence),
+                    confidence=float(detection[4]),
                 )
-                overlap, active_box = max(
-                    ((self._box_iou(detector_box, box), box) for box in active_boxes),
-                    default=(0.0, None),
-                    key=lambda item: item[0],
-                )
-                track_id = active_box.track_id if active_box is not None and overlap >= 0.30 else None
+                for detection in detections
+            ]
+            # A ByteTrack state may overlap more than one detector box, notably
+            # when the far crop contributes a partial supplemental box.  Claim
+            # each raw tracklet at most once so it cannot manufacture two
+            # canonical observations in the same frame.
+            detector_track_matches: dict[int, BoundingBox] = {}
+            matched_track_ids: set[int] = set()
+            overlaps = sorted(
+                (
+                    (self._box_iou(detector_box, active_box), detector_index, active_box)
+                    for detector_index, detector_box in enumerate(detector_boxes)
+                    for active_box in active_boxes
+                ),
+                key=lambda item: (-item[0], item[1], item[2].track_id or -1),
+            )
+            for overlap, detector_index, active_box in overlaps:
+                track_id = active_box.track_id
+                if overlap < 0.30 or detector_index in detector_track_matches or track_id in matched_track_ids:
+                    continue
+                detector_track_matches[detector_index] = active_box
+                matched_track_ids.add(track_id)
+            for detector_index, detector_box in enumerate(detector_boxes):
+                active_box = detector_track_matches.get(detector_index)
+                track_id = active_box.track_id if active_box is not None else None
                 if track_id is not None:
                     detector_box = detector_box.model_copy(update={"id": track_id, "track_id": track_id})
-                    matched_track_ids.add(track_id)
                 result.append(
                     IdentityCandidate(
                         lane_id=lane_id,
@@ -490,6 +509,7 @@ class TrackingService:
     @staticmethod
     def _resolved_identity_boxes(resolution) -> list[BoundingBox]:
         boxes = []
+        used_legacy_ids: set[int] = set()
         for assignment in resolution.assignments:
             box = assignment.candidate.box
             # A detector-only observation used to share the ``-1`` sentinel
@@ -499,7 +519,12 @@ class TrackingService:
             # stable, negative session-local fallback otherwise.  ``track_id``
             # remains the unambiguous indication of whether ByteTrack produced
             # a tracklet for this observation.
-            legacy_id = box.track_id if box.track_id is not None else -assignment.identity_id
+            legacy_id = (
+                box.track_id
+                if box.track_id is not None and box.track_id not in used_legacy_ids
+                else -assignment.identity_id
+            )
+            used_legacy_ids.add(legacy_id)
             boxes.append(
                 box.model_copy(
                     update={
