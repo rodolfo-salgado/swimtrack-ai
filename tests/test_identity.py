@@ -420,6 +420,77 @@ def test_raw_track_id_swap_cannot_override_two_swimmer_trajectories() -> None:
     }
 
 
+def test_single_observation_during_a_two_swimmer_crossing_does_not_exchange_ids() -> None:
+    resolver = _resolver()
+    _resolve(
+        resolver,
+        0.0,
+        [
+            _candidate(10, lane_x=0.50, position=0.30),
+            _candidate(20, lane_x=0.50, position=0.70),
+        ],
+    )
+    _resolve(
+        resolver,
+        1_000.0,
+        [
+            _candidate(10, lane_x=0.50, position=0.40),
+            _candidate(20, lane_x=0.50, position=0.60),
+        ],
+    )
+
+    occluded = _resolve(resolver, 2_000.0, [_candidate(99, lane_x=0.50, position=0.50)])
+    separated = _resolve(
+        resolver,
+        3_000.0,
+        [
+            _candidate(88, lane_x=0.50, position=0.70),
+            _candidate(99, lane_x=0.50, position=0.30),
+        ],
+    )
+
+    assert occluded.assignments == []
+    assert {assignment.candidate.track_id: assignment.identity_id for assignment in separated.assignments} == {
+        88: 1,
+        99: 2,
+    }
+
+
+def test_unique_unmatched_detector_observation_recovers_the_other_confirmed_swimmer() -> None:
+    resolver = _resolver()
+    _resolve(
+        resolver,
+        0.0,
+        [
+            _candidate(10, lane_x=0.25, position=0.20),
+            _candidate(20, lane_x=0.75, position=0.80),
+        ],
+    )
+    _resolve(
+        resolver,
+        1_000.0,
+        [
+            _candidate(10, lane_x=0.25, position=0.30),
+            _candidate(20, lane_x=0.75, position=0.70),
+        ],
+    )
+
+    recovered = _resolve(
+        resolver,
+        2_000.0,
+        [
+            _candidate(11, lane_x=0.25, position=0.40),
+            _candidate(None, lane_x=0.75, position=0.98),
+        ],
+    )
+
+    assert {assignment.identity_id for assignment in recovered.assignments} == {1, 2}
+    assert {assignment.candidate.track_id: assignment.identity_id for assignment in recovered.assignments} == {
+        11: 1,
+        None: 2,
+    }
+
+
 def test_long_detector_gap_reacquires_the_only_swimmer_without_new_identity() -> None:
     resolver = _resolver()
     _resolve(resolver, 0.0, [_candidate(7, lane_x=0.45, position=0.20)])

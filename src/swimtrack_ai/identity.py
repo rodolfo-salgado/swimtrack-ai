@@ -105,6 +105,9 @@ class IdentityResolver:
     unlimited number of people.
     """
 
+    _OCCLUSION_POSITION_DELTA = 0.18
+    _OCCLUSION_HOLD_SECONDS = 1.5
+
     def __init__(
         self,
         *,
@@ -153,6 +156,7 @@ class IdentityResolver:
             else {}
         )
         self._identities: dict[str, list[_Identity]] = {}
+        self._occlusion_until_ms: dict[str, float] = {}
         self._next_identity_id = 1
         self._next_swimmer_id = 1
 
@@ -238,6 +242,13 @@ class IdentityResolver:
         if not candidates:
             return []
 
+        # When two confirmed swimmers overlap, a detector can legitimately
+        # collapse them into one physical-looking observation.  Updating just
+        # one canonical trajectory in that interval is what later lets the
+        # two identities exchange.  Hold both until they separate instead.
+        if self._is_two_swimmer_occlusion(lane_id, identities, candidates, time_ms):
+            return []
+
         matched_candidates: set[int] = set()
         matched_identities: set[int] = set()
         assigned: dict[int, _Identity] = {}
@@ -259,16 +270,46 @@ class IdentityResolver:
                 matched_identities.add(int(identity_index))
                 assigned[int(candidate_index)] = identity
 
+        unmatched = [index for index in range(len(candidates)) if index not in matched_candidates]
         # A lone dormant trajectory is much stronger evidence than a new person
         # after a detector gap.  This is what stitches the long test08 gaps while
         # still allowing a second swimmer to be born when both are visible.
-        unmatched = [index for index in range(len(candidates)) if index not in matched_candidates]
         if len(identities) == 1 and not matched_identities and unmatched:
             candidate_index = unmatched.pop(0)
             self._update_identity(identities[0], candidates[candidate_index], time_ms)
             matched_candidates.add(candidate_index)
             matched_identities.add(0)
             assigned[candidate_index] = identities[0]
+
+        # At the two-swimmer limit, one clearly matched swimmer plus exactly
+        # one remaining detector observation identifies the missing swimmer by
+        # exclusion.  This is intentionally narrower than loosening the normal
+        # motion gate: it recovers from an occlusion without admitting a third
+        # detection as a new person.
+        unmatched_identity_indices = [
+            index for index in range(len(identities)) if index not in matched_identities
+        ]
+        unmatched_detector_indices = [
+            index
+            for index in unmatched
+            if candidates[index].candidate.source == "detection"
+            and candidates[index].candidate.box.conf >= self.confirmation_confidence
+        ]
+        if (
+            len(identities) == self.max_per_lane
+            and all(identity.confirmed for identity in identities)
+            and matched_identities
+            and len(unmatched_identity_indices) == 1
+            and len(unmatched_detector_indices) == 1
+        ):
+            identity_index = unmatched_identity_indices[0]
+            candidate_index = unmatched_detector_indices[0]
+            identity = identities[identity_index]
+            self._update_identity(identity, candidates[candidate_index], time_ms)
+            matched_candidates.add(candidate_index)
+            matched_identities.add(identity_index)
+            assigned[candidate_index] = identity
+            unmatched.remove(candidate_index)
 
         for candidate_index in unmatched:
             if len(identities) >= self.max_per_lane:
@@ -309,6 +350,37 @@ class IdentityResolver:
                 )
             )
         return result
+
+    def _is_two_swimmer_occlusion(
+        self,
+        lane_id: str,
+        identities: list[_Identity],
+        candidates: list[_ProjectedCandidate],
+        time_ms: float,
+    ) -> bool:
+        """Hold an ambiguous one-observation crossing until separation."""
+
+        occlusion_until_ms = self._occlusion_until_ms.get(lane_id, 0.0)
+        if occlusion_until_ms > time_ms:
+            if len(candidates) < 2:
+                return True
+            self._occlusion_until_ms.pop(lane_id, None)
+            return False
+        self._occlusion_until_ms.pop(lane_id, None)
+        if len(identities) != 2 or len(candidates) >= 2 or not all(identity.confirmed for identity in identities):
+            return False
+
+        first, second = identities
+        first_elapsed = max(0.0, time_ms - first.last_seen_ms) / 1000.0
+        second_elapsed = max(0.0, time_ms - second.last_seen_ms) / 1000.0
+        first_predicted = first.position + first.velocity_position * first_elapsed
+        second_predicted = second.position + second.velocity_position * second_elapsed
+        are_approaching = first.velocity_position * second.velocity_position < 0.0
+        if not are_approaching or abs(first_predicted - second_predicted) > self._OCCLUSION_POSITION_DELTA:
+            return False
+
+        self._occlusion_until_ms[lane_id] = time_ms + self._OCCLUSION_HOLD_SECONDS * 1000.0
+        return True
 
     def _record_cooccurrence(
         self,
@@ -413,8 +485,12 @@ class IdentityResolver:
             limit = self.max_speed_per_second * 2.0
             observed_position_velocity = float(np.clip(observed_position_velocity, -limit, limit))
             observed_lane_x_velocity = float(np.clip(observed_lane_x_velocity, -limit, limit))
-            identity.velocity_position = 0.7 * identity.velocity_position + 0.3 * observed_position_velocity
-            identity.velocity_lane_x = 0.7 * identity.velocity_lane_x + 0.3 * observed_lane_x_velocity
+            # Use the latest observation as the dominant term.  A heavily
+            # smoothed velocity lags behind a swimmer after a short occlusion,
+            # which makes the nearest-position assignment prefer the swimmer
+            # travelling in the opposite direction after they cross.
+            identity.velocity_position = 0.3 * identity.velocity_position + 0.7 * observed_position_velocity
+            identity.velocity_lane_x = 0.3 * identity.velocity_lane_x + 0.7 * observed_lane_x_velocity
         identity.last_seen_ms = time_ms
         identity.position = candidate.position
         identity.minimum_position = min(identity.minimum_position, candidate.position)
